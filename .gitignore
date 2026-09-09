@@ -16,6 +16,7 @@ data/vectorstore/*
 *.egg-info/
 build/
 dist/
+*.zip
 
 
 
