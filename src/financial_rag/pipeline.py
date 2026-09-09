@@ -9,17 +9,22 @@ from financial_rag.ingestion.dataset_adapters import (
     ViFinTabDatasetLoader,
 )
 from financial_rag.ingestion.document_loader import DocumentLoader
-from financial_rag.ingestion.models import DocumentElement
+from rich.progress import track
+
+from financial_rag.ingestion.models import DocumentElement, Modality
 from financial_rag.reasoning.financial_qa import FinancialQAEngine
 from financial_rag.reasoning.multimodal_summarizer import MultimodalSummarizer
 from financial_rag.retrieval.chunking import chunk_elements
 from financial_rag.retrieval.vector_store import FinancialVectorStore
 
 
-def ingest(path: Path, summarize_multimodal: bool = True) -> int:
+def ingest(path: Path, summarize_multimodal: bool = True, max_pages: int | None = None) -> int:
     """Ingests documents/PDFs using the Multi-Vector multimodal pipeline."""
     settings = get_settings()
-    elements = DocumentLoader(image_output_dir=settings.data_dir / "processed" / "images").load_path(path)
+    elements = DocumentLoader(
+        image_output_dir=settings.data_dir / "processed" / "images",
+        max_pages=max_pages,
+    ).load_path(path)
     
     if not elements:
         return 0
@@ -27,9 +32,14 @@ def ingest(path: Path, summarize_multimodal: bool = True) -> int:
     summarized_elements: list[DocumentElement] = []
     if summarize_multimodal and settings.api_key:
         summarizer = MultimodalSummarizer(settings)
-        for el in elements:
-            summary = summarizer.summarize_element(el)
-            summarized_elements.append(replace(el, summary=summary))
+        # Summarize tables & images with Gemini, keep natural text directly to save API quota and time
+        for el in track(elements, description="[bold cyan]Bóc tách & Tóm tắt đa phương thức (Gemini)...[/bold cyan]"):
+            modality_val = el.modality.value if hasattr(el.modality, "value") else str(el.modality).lower()
+            if modality_val == "text":
+                summarized_elements.append(replace(el, summary=el.content))
+            else:
+                summary = summarizer.summarize_element(el)
+                summarized_elements.append(replace(el, summary=summary))
     else:
         summarized_elements = elements
 

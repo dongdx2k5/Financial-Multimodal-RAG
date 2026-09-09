@@ -41,8 +41,9 @@ def _table_to_html(table_data: list[list[str | None]]) -> str:
 
 
 class DocumentLoader:
-    def __init__(self, image_output_dir: Path | None = None):
+    def __init__(self, image_output_dir: Path | None = None, max_pages: int | None = None):
         self.image_output_dir = image_output_dir or Path("data/processed/images")
+        self.max_pages = max_pages
 
     def load_path(self, path: Path) -> list[DocumentElement]:
         if path.is_dir():
@@ -98,7 +99,8 @@ class DocumentLoader:
 
         # 1. Extract Text
         reader = PdfReader(str(path))
-        for page_idx, page in enumerate(reader.pages, start=1):
+        pdf_pages = reader.pages[: self.max_pages] if self.max_pages else reader.pages
+        for page_idx, page in enumerate(pdf_pages, start=1):
             text = (page.extract_text() or "").strip()
             if text:
                 elements.append(
@@ -115,7 +117,8 @@ class DocumentLoader:
         # 2. Extract Tables (HTML structured) and Images using pdfplumber / pypdf
         try:
             with pdfplumber.open(path) as pdf:
-                for page_idx, page in enumerate(pdf.pages, start=1):
+                plumber_pages = pdf.pages[: self.max_pages] if self.max_pages else pdf.pages
+                for page_idx, page in enumerate(plumber_pages, start=1):
                     # Extract Tables
                     tables = page.extract_tables() or []
                     for table_idx, table in enumerate(tables, start=1):
@@ -137,7 +140,7 @@ class DocumentLoader:
             pass
 
         # 3. Extract Images from PDF pages
-        for page_idx, page in enumerate(reader.pages, start=1):
+        for page_idx, page in enumerate(pdf_pages, start=1):
             try:
                 for img_idx, img_obj in enumerate(page.images, start=1):
                     try:

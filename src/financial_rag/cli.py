@@ -25,10 +25,13 @@ def ingest(
     summarize: bool = typer.Option(
         True, "--summarize/--no-summarize", help="Run Multimodal Summarization (LLM for tables & vision for images)"
     ),
+    max_pages: int | None = typer.Option(
+        None, "--max-pages", "-p", help="Giới hạn số trang PDF cần xử lý (rất hữu ích cho file dài)"
+    ),
 ) -> None:
     """Extracts text, HTML tables, and images from document and indexes them into Multi-Vector Store."""
-    console.print(f"[bold cyan]Ingesting multimodal content from:[/] {path} (summarize={summarize})")
-    indexed = ingest_path(path, summarize_multimodal=summarize)
+    console.print(f"[bold cyan]Ingesting multimodal content from:[/] {path} (summarize={summarize}, max_pages={max_pages})")
+    indexed = ingest_path(path, summarize_multimodal=summarize, max_pages=max_pages)
     console.print(f"[bold green]Successfully indexed {indexed} elements into Multi-Vector Store![/]")
 
 
