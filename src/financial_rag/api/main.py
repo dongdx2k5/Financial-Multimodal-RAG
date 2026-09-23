@@ -13,6 +13,7 @@ app = FastAPI(title="Financial Multimodal RAG API", version="0.2.0")
 class AskRequest(BaseModel):
     question: str
     limit: int = 6
+    use_pot: bool = False
 
 
 class AskResponse(BaseModel):
@@ -20,6 +21,9 @@ class AskResponse(BaseModel):
     contexts: list[dict[str, Any]]
     retrieved_images: list[dict[str, Any]]
     retrieved_tables: list[dict[str, Any]]
+    generated_code: str | None = None
+    computed_answer: Any = None
+    pot_success: bool | None = None
 
 
 @app.get("/health")
@@ -44,7 +48,7 @@ async def upload_report(
 
 @app.post("/ask", response_model=AskResponse)
 def ask_question(request: AskRequest) -> dict[str, Any]:
-    return query(request.question, limit=request.limit)
+    return query(request.question, limit=request.limit, use_pot=request.use_pot)
 
 
 @app.post("/ingest")

@@ -7,6 +7,11 @@ from pathlib import Path
 import pdfplumber
 from pypdf import PdfReader
 
+from financial_rag.ingestion.financial_normalizer import (
+    detect_scale_factor,
+    flatten_row_headers,
+    normalize_table_values,
+)
 from financial_rag.ingestion.models import DocumentElement, Modality
 
 SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".txt", ".md"}
@@ -124,6 +129,9 @@ class DocumentLoader:
                     for table_idx, table in enumerate(tables, start=1):
                         table_html = _table_to_html(table)
                         if table_html:
+                            # Normalize financial values and flatten row headers
+                            table_html, scale_factor = normalize_table_values(table_html)
+                            table_html = flatten_row_headers(table_html)
                             elements.append(
                                 DocumentElement(
                                     content=table_html,
@@ -132,7 +140,10 @@ class DocumentLoader:
                                     source_path=path,
                                     page=page_idx,
                                     element_id=f"{path.name}:p{page_idx}:tbl{table_idx}",
-                                    metadata={"table_index": table_idx},
+                                    metadata={
+                                        "table_index": table_idx,
+                                        "scale_factor": scale_factor,
+                                    },
                                 )
                             )
         except Exception:

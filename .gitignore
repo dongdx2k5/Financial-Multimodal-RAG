@@ -10,9 +10,11 @@ __pycache__/
 data/raw/*
 data/processed/*
 data/vectorstore/*
+data/graph/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/vectorstore/.gitkeep
+!data/graph/.gitkeep
 *.egg-info/
 build/
 dist/

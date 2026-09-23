@@ -17,5 +17,10 @@ pandas>=2.0
 pyarrow>=15.0
 fastparquet>=2024.0
 
+# GraphRAG dependencies
+networkx>=3.2
+datasets>=2.20
+huggingface-hub>=0.23
+
 
 

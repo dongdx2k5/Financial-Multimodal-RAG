@@ -9,8 +9,13 @@ from financial_rag.ingestion.models import DocumentElement
 from financial_rag.retrieval.chunking import chunk_elements
 
 
+import pytest
+
+
 def test_finqa_loader_sample() -> None:
     loader = FinQADatasetLoader()
+    if not (loader.data_dir / "train.parquet").exists():
+        pytest.skip("FinQA raw dataset not downloaded.")
     elements = loader.load(split="train", sample_size=3)
     assert len(elements) == 3
     assert elements[0].metadata["dataset"] == "finqa"
@@ -19,6 +24,8 @@ def test_finqa_loader_sample() -> None:
 
 def test_vifintab_loader_sample() -> None:
     loader = ViFinTabDatasetLoader()
+    if not (loader.data_dir / "train.parquet").exists():
+        pytest.skip("ViFinTab raw dataset not downloaded.")
     elements = loader.load(split="train", sample_size=3)
     assert len(elements) == 3
     assert elements[0].metadata["dataset"] == "vifintab"
@@ -27,6 +34,8 @@ def test_vifintab_loader_sample() -> None:
 
 def test_sec_edgar_loader_sample() -> None:
     loader = SECEdgarDatasetLoader()
+    if not loader.data_dir.exists():
+        pytest.skip("SEC EDGAR raw dataset not downloaded.")
     elements = loader.load(sample_size=3)
     assert isinstance(elements, list)
     if elements:

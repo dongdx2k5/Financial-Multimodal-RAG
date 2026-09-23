@@ -1,29 +1,39 @@
-import time
 from typing import Any
 
 import chromadb
-from google import genai
 
 from financial_rag.config.settings import Settings
 from financial_rag.ingestion.models import Chunk
+from financial_rag.reasoning.llm_client import UnifiedLLMClient
 from financial_rag.retrieval.doc_store import DocStore
 
 
 class FinancialVectorStore:
     """Multi-Vector Store: Indexes summaries in ChromaDB and links to raw elements in DocStore."""
 
-    def __init__(self, settings: Settings, doc_store: DocStore | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        doc_store: DocStore | None = None,
+        llm_client: UnifiedLLMClient | None = None,
+    ):
         self.settings = settings
         self.client = chromadb.PersistentClient(path=str(settings.chroma_dir))
         self.collection = self.client.get_or_create_collection(settings.collection_name)
         self.doc_store = doc_store or DocStore(storage_path=settings.data_dir / "processed" / "docstore.json")
+        try:
+            self.llm_client = llm_client or UnifiedLLMClient(settings)
+        except Exception:
+            self.llm_client = None
 
-        api_key = settings.api_key
-        if not api_key:
-            raise ValueError(
-                "GEMINI_API_KEY chưa được cấu hình! Vui lòng điền GEMINI_API_KEY vào file '.env'."
-            )
-        self.genai_client = genai.Client(api_key=api_key)
+    @property
+    def genai_client(self) -> Any:
+        return self.llm_client.genai_client if self.llm_client else None
+
+    @genai_client.setter
+    def genai_client(self, value: Any) -> None:
+        if self.llm_client:
+            self.llm_client.genai_client = value
 
     def add_chunks(self, chunks: list[Chunk]) -> int:
         if not chunks:
@@ -84,7 +94,7 @@ class FinancialVectorStore:
     def search(self, query: str, limit: int = 6) -> list[dict[str, Any]]:
         query_embedding = self._embed([query])[0]
         result = self.collection.query(query_embeddings=[query_embedding], n_results=limit)
-        
+
         documents = result.get("documents", [[]])[0]
         metadatas = result.get("metadatas", [[]])[0]
         distances = result.get("distances", [[]])[0]
@@ -109,26 +119,8 @@ class FinancialVectorStore:
     def _embed(self, texts: list[str], batch_size: int = 64) -> list[list[float]]:
         if not texts:
             return []
-        all_embeddings: list[list[float]] = []
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
-            success = False
-            for attempt in range(7):
-                try:
-                    response = self.genai_client.models.embed_content(
-                        model=self.settings.embedding_model,
-                        contents=batch,
-                    )
-                    all_embeddings.extend([item.values for item in response.embeddings])
-                    success = True
-                    break
-                except Exception as e:
-                    err_msg = str(e)
-                    if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                        time.sleep(6 * (attempt + 1))
-                    else:
-                        raise e
-            if not success:
-                raise RuntimeError(f"Failed to embed batch starting at index {i} after 7 retries.")
-            time.sleep(0.3)
-        return all_embeddings
+        if self.llm_client:
+            return self.llm_client.embed_texts(texts, batch_size=batch_size)
+        raise ValueError(
+            "Chưa cấu hình API key để tạo embeddings! Vui lòng điền GEMINI_API_KEY hoặc LLAMA_EMBEDDING_MODEL vào .env."
+        )
