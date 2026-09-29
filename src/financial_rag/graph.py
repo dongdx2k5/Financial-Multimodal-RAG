@@ -25,12 +25,23 @@ class KnowledgeGraph:
     def add_document(
         self, document: Document, chunks: list[Chunk], facts: list[FinancialFact]
     ) -> None:
+        if document.id in self.graph:
+            # Replace only this report's derived nodes after parser improvements.
+            owned = [
+                n
+                for n, a in self.graph.nodes(data=True)
+                if a.get("kind") in {"Chunk", "Fact"}
+                and (a.get("document_id") == document.id or self.graph.has_edge(document.id, n))
+            ]
+            self.graph.remove_nodes_from(owned + [document.id])
         self.graph.add_node(
             document.id,
             kind="Report",
             source=document.source,
             ticker=document.ticker,
             year=document.year,
+            name=document.name,
+            scope=document.scope,
         )
         if document.ticker:
             company_id = f"company:{document.ticker.upper()}"

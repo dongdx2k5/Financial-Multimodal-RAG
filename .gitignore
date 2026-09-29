@@ -3,6 +3,17 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+dist/
+build/
+*.egg-info/
+work/
+data/uploads/
+data/tessdata/
+data/tessdata-best/
 data/raw/**
 data/processed/**
 data/index/**
