@@ -7,6 +7,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from .financial_tables import fold
 from .graph import KnowledgeGraph
 from .models import Chunk, Evidence
+from .storage import atomic_json
 
 
 class HybridRetriever:
@@ -43,10 +44,7 @@ class HybridRetriever:
         current.update({chunk.id: chunk for chunk in chunks})
         self.chunks = list(current.values())
         self.chunks_path.parent.mkdir(parents=True, exist_ok=True)
-        self.chunks_path.write_text(
-            json.dumps([chunk.model_dump() for chunk in self.chunks], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        atomic_json(self.chunks_path, [chunk.model_dump() for chunk in self.chunks])
         self._fit()
 
     def search(self, query: str, top_k: int = 5, document_id: str | None = None) -> list[Evidence]:

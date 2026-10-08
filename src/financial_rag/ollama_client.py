@@ -1,5 +1,6 @@
 import json
 import re
+from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -7,6 +8,50 @@ from urllib.request import Request, urlopen
 
 class OllamaError(RuntimeError):
     pass
+
+
+_generation_lock = Lock()
+
+
+def local_base(settings):
+    base = settings.ollama_base_url.rstrip("/")
+    parsed = urlparse(base)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise OllamaError("Ollama chỉ cho phép địa chỉ localhost trong chế độ local.")
+    if "cloud" in settings.ollama_model.lower():
+        raise OllamaError("Hãy chọn model local, không dùng model cloud.")
+    return base
+
+
+def probe(settings):
+    result = {
+        "provider": settings.llm_provider,
+        "model": settings.ollama_model,
+        "ready": False,
+        "busy": _generation_lock.locked(),
+    }
+    if settings.llm_provider != "ollama":
+        return {**result, "message": "Provider hiện tại không phải Ollama."}
+    try:
+        base = local_base(settings)
+        with urlopen(base + "/api/tags", timeout=3) as response:
+            models = json.load(response).get("models", [])
+        names = {m.get("name") or m.get("model") for m in models}
+        ready = settings.ollama_model in names or settings.ollama_model + ":latest" in names
+        return {
+            **result,
+            "ready": ready,
+            "message": "Model sẵn sàng." if ready else "Chưa tải model đã cấu hình.",
+        }
+    except (OllamaError, URLError, OSError, ValueError, TypeError, AttributeError):
+        return {**result, "message": "Không kết nối được Ollama hoặc cấu hình local không hợp lệ."}
 
 
 def validate_output(output, evidence, question=""):
@@ -50,11 +95,17 @@ def validate_output(output, evidence, question=""):
 
 
 def generate(settings, question: str, evidence: str) -> str:
-    base = settings.ollama_base_url.rstrip("/")
-    if urlparse(base).hostname not in {"localhost", "127.0.0.1", "::1"}:
-        raise OllamaError("Ollama chỉ cho phép địa chỉ localhost trong chế độ local.")
-    if "cloud" in settings.ollama_model.lower():
-        raise OllamaError("Hãy chọn model local, không dùng model cloud.")
+    local_base(settings)
+    if not _generation_lock.acquire(blocking=False):
+        raise OllamaError("Ollama đang xử lý câu hỏi khác; trả bằng chứng gốc. Hãy thử lại sau.")
+    try:
+        return _generate(settings, question, evidence)
+    finally:
+        _generation_lock.release()
+
+
+def _generate(settings, question, evidence):
+    base = local_base(settings)
     # Character bound keeps retrieval prompts modest on a 16 GB CPU machine.
     if len(evidence) > 8000:
         raise OllamaError("Bằng chứng quá dài cho cấu hình local; giảm top_k hoặc hỏi cụ thể hơn.")

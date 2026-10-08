@@ -154,8 +154,26 @@ Các trang OCR được lưu đệm; lần đọc đầu có thể chậm trên 
 API bổ sung: `POST /ingest` với `background=true`, `GET /jobs/{id}`,
 `GET /documents/{id}/analysis`, `GET /documents/{id}/pages/{page}?chunk_id=...`,
 `GET /documents/{id}/file`, `POST /calculate`.
-Chỉ chạy một worker trên localhost; hàng đợi nằm trong RAM và không phục hồi qua restart.
+Chỉ chạy một worker trên localhost. Lịch sử tác vụ lưu tại `data/processed/jobs.json`;
+tác vụ đang dở khi restart chuyển sang `interrupted` và cần nạp lại tài liệu.
+Không tự tiếp tục tác vụ; OCR cache vẫn được sử dụng khi nạp lại. Giới hạn 8 tác vụ
+đang chờ/chạy và lưu tối đa 200 kết quả gần nhất.
 Chưa có xác thực người dùng; không mở dịch vụ trực tiếp ra Internet.
+
+### Tổng quan và vận hành (08-10-2026)
+
+- Tổng quan theo từng báo cáo: doanh thu, lợi nhuận, tài sản, vốn, dòng tiền, tăng trưởng
+  so với kỳ có trong tài liệu và biên lợi nhuận. Mỗi phép tính giữ công thức và fact đầu vào.
+- Graph explorer hiển thị quan hệ Metric → Fact → Chunk, lọc theo báo cáo, không trộn công ty.
+- `GET /documents/{id}/export`: tải JSON chứa dữ liệu, chất lượng, nguồn và tổng quan;
+  bỏ đường dẫn tuyệt đối trên máy. Không tải dữ liệu ra dịch vụ bên ngoài.
+- `GET /documents/{id}/graph`: graph đã lọc; `GET /jobs`: lịch sử xử lý.
+- `GET /health/ollama`: kiểm tra kết nối và model local thực tế (timeout 3 giây).
+  Chỉ cho phép một lần sinh Ollama đồng thời; câu hỏi khác nhận bằng chứng gốc khi bận.
+- Graph/chunks/metadata/jobs được ghi qua file tạm rồi thay thế nguyên tử từng file.
+  Đây **không phải** transaction nhiều file: nếu mất điện giữa hai lần ghi, nạp lại báo cáo
+  để tái tạo chỉ mục. Vẫn chưa hỗ trợ nhiều worker hoặc triển khai public.
+- Các file dữ liệu và PDF hiện có được giữ nguyên. Không tự tải model lớn hay dùng cloud.
 
 Đã kiểm tra báo cáo VNM riêng Q1/2026: OCR 55 trang, trích 44 dòng bảng chuẩn.
 Đọc lại vùng mã dòng bị lỗi bằng OCR ảnh cắt; giữ dấu vết phục hồi và không suy số từ công thức.

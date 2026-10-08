@@ -12,6 +12,7 @@ from .graph import KnowledgeGraph
 from .ingestion import Chunker, DocumentLoader
 from .models import AskResponse
 from .retrieval import HybridRetriever
+from .storage import atomic_json
 
 
 class FinancialRAGService:
@@ -64,9 +65,7 @@ class FinancialRAGService:
         }
         meta_path = self.settings.data_dir / "processed" / "reports" / f"{document.id}.json"
         meta_path.parent.mkdir(parents=True, exist_ok=True)
-        import json
-
-        meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_json(meta_path, metadata)
         self.graph.add_document(document, chunks, facts)
         self.retriever.upsert(chunks)
         return {

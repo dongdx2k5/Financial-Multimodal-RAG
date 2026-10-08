@@ -4,6 +4,7 @@ from pathlib import Path
 import networkx as nx
 
 from .models import Chunk, Document, FinancialFact, GraphExport
+from .storage import atomic_json
 
 
 class KnowledgeGraph:
@@ -20,7 +21,7 @@ class KnowledgeGraph:
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = nx.node_link_data(self.graph, edges="edges")
-        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_json(self.path, payload)
 
     def add_document(
         self, document: Document, chunks: list[Chunk], facts: list[FinancialFact]
