@@ -1,4 +1,3 @@
-__all__ = ["__version__"]
+"""Multimodal RAG Financial."""
 
 __version__ = "0.1.0"
-

@@ -1,0 +1,8 @@
+===== PAGE 1 =====
+Apple Inc. (AAPL) Annual Financial Overview 2024
+Total Revenue in 2024 was $383.3 billion, compared to $383.29 billion in the prior period.
+Operating Income reached $123.2 billion and Net Income was $93.7 billion.
+
+===== PAGE 2 =====
+As of September 30, 2024, Total Assets stood at $364.9 billion and Total Liabilities reached $308.0 billion.
+Stockholders' Equity amounted to $56.9 billion.
