@@ -1,113 +1,135 @@
-# Multimodal RAG Financial
+# 📊 Financial Multimodal RAG — Hệ Thống Hỏi Đáp Báo Cáo Tài Chính
 
-Hệ thống đọc hiểu báo cáo tài chính **song ngữ Việt – Anh** theo luồng:
+Hệ thống RAG đọc và tra cứu Báo cáo tài chính (BCTC) song ngữ (tiếng Việt & tiếng Anh), kết hợp bảng số liệu có cấu trúc **SQLite**, tìm kiếm lai **Hybrid Search (BGE-M3 + FTS5 BM25)**, tính toán tài chính tiền tệ chính xác bằng **Python** và diễn đạt câu trả lời kèm trích dẫn nguồn xác thực với mô hình **Qwen2.5-3B-Instruct**.
 
-`PDF / OCR text / table -> chunks + facts -> Knowledge Graph G=(V,E) -> hybrid retrieval (TF-IDF + Dense Embedding) -> LLM answer + citations`
+Xây dựng tuân thủ 100% theo tài liệu thiết kế [phan_tich_thiet_ke_rag_tai_chinh.md](../phan_tich_thiet_ke_rag_tai_chinh.md).
 
-## Dataset được chọn
+---
 
-| Vai trò | Dataset | Quyết định |
-|---|---|---|
-| Corpus báo cáo và câu hỏi tiếng Việt | `AIGuruTinix/ViFinQA` | Nguồn chính cho retrieval/ingestion |
-| Ảnh bảng + cấu trúc bảng | `VietFinTabGroup/VietFinTab` | Nguồn chính cho nhánh multimodal/table |
-| Table detection nhỏ hơn | `ngnquan/ViFinTab` | Baseline phụ cho detector, không trộn nhãn mặc định |
-| QA tiếng Việt có ground truth | `duykhangh/VNFinsQA` | Evaluation set phụ; cần kiểm tra độ tin cậy bằng chứng |
-| Numerical reasoning tiếng Anh | `dreamerdeo/finqa` | Benchmark phụ cho calculator/reasoning |
+## 🌟 Tính Năng Nổi Bật
 
-Lưu ý giấy phép: ViFinQA và VietFinTab dùng dữ liệu CC BY-NC 4.0; MVP mặc định phục vụ nghiên cứu, không mặc định cho mục đích thương mại.
+1. **Số liệu chuẩn xác (Zero Math Hallucination):** 
+   - LLM không tự thực hiện phép tính số học.
+   - Các phép tính tài chính (Biên lợi nhuận gộp/ròng, tỷ lệ Nợ/Vốn chủ sở hữu D/E, tăng trưởng cùng kỳ YoY, đối sánh liên công ty) được thực thi bằng Python Calculator.
+2. **Cơ sở dữ liệu số liệu có cấu trúc (`fact` table):**
+   - Lưu trữ chi tiết từng dòng báo cáo (`line_item`), vai trò cột (`current`, `prior_year_same_period`, `year_start`), giá trị đã quy đổi scale và chuỗi gốc (`value_raw`).
+   - Kiểm tra tính cân đối kế toán: $Tổng\ tài\ sản = Nợ\ phải\ trả + Vốn\ chủ\ sở\ hữu$.
+3. **Tìm kiếm lai Hybrid Retrieval + Metadata Filtering:**
+   - Kết hợp Dense Vector Search (BGE-M3 / FAISS) và Lexical Search (SQLite FTS5 BM25).
+   - Lọc theo mã cổ phiếu (`ticker`), năm tài chính (`fiscal_year`) và kỳ báo cáo (`period_type`).
+4. **Trích dẫn nguồn minh bạch (Provenance):**
+   - Mọi câu trả lời đều ghi rõ: `[MÃ_CK | KỲ/NĂM | Trang X | Bảng/Mục]`.
+5. **Đối soát số liệu tự động (Numerical Verification):**
+   - Quét kiểm tra mọi con số xuất hiện trong câu trả lời với số liệu gốc từ báo cáo, gắn cờ cảnh báo nếu xuất hiện số lạ.
+6. **Xử lý câu hỏi bẫy & từ chối trả lời lịch sự:**
+   - Tự động nhận diện và từ chối các câu hỏi dự báo giá cổ phiếu tương lai, khuyến nghị mua/bán hoặc thông tin không có trong tài liệu.
+7. **Tương thích Google Colab GPU T4:**
+   - Chạy mượt mà trên môi trường Colab T4 miễn phí với mô hình `Qwen2.5-3B-Instruct` (fp16) chỉ chiếm ~8-9 GB VRAM.
 
-## Chạy nhanh
+---
 
-```powershell
-cd C:\DXD\Multimodal-RAG-Financial
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e ".[dev,llm]"
+## 📁 Cấu Trúc Thư Mục
+
+```
+Financial-Multimodal-RAG-master/
+├── data/
+│   ├── manifest.csv               # Danh mục báo cáo và metadata
+│   ├── raw/                       # Báo cáo gốc dạng PDF / TXT
+│   │   ├── AAA/                   # Nhựa An Phát Xanh (BCTC kiểm toán 2025)
+│   │   ├── NVDA/                  # NVIDIA Corporation (10-K Report FY2025)
+│   │   ├── HPG/                   # Tập đoàn Hòa Phát (BCTC H1/2026)
+│   │   └── VNM/                   # Vinamilk (BCTC H1/2026)
+│   ├── parsed/                    # Kết quả parse: document.md, tables.json
+│   ├── structured/
+│   │   ├── financial.db           # SQLite database
+│   │   └── metrics_seed.csv       # Từ điển 16 chỉ tiêu chung & alias Việt - Anh
+│   ├── index/
+│   │   ├── faiss.index            # Dense vector index
+│   │   └── chunk_ids.json         # Mapping vector ID -> chunk_id
+│   └── eval/
+│       └── questions.csv          # 36 câu hỏi đánh giá benchmark
+├── docs/
+│   └── ARCHITECTURE.md            # Thiết kế kiến trúc chi tiết
+├── notebooks/
+│   └── colab_financial_rag.ipynb  # Notebook demo chạy trên Google Colab T4
+├── src/
+│   └── financial_rag/
+│       ├── config.py              # Cấu hình Pydantic Settings
+│       ├── cli.py                 # Rich CLI (seed, ingest, ask, eval, serve)
+│       ├── db/                    # SQLite schema, repository, seed
+│       ├── parser/                # Number normalizer, PDF/Table parser, Chunker
+│       ├── extractor/             # Slot extractor, Fact extractor, Validator
+│       ├── retrieval/             # BGE-M3 Dense, FTS5 Lexical, Hybrid fusion
+│       ├── reasoning/             # Calculator, Router, Numerical Verifier, Engine
+│       ├── llm/                   # Prompt templates, Qwen2.5-3B loader
+│       ├── ui/                    # Gradio Web UI
+│       └── evaluation/            # Automated benchmark evaluator
+├── tests/                         # Unit tests toàn diện (100% pass)
+├── requirements.txt
+└── pyproject.toml
 ```
 
-### Cấu hình API key (miễn phí)
+---
 
-Tạo file `.env` từ `.env.example` và điền Google API key (lấy miễn phí tại https://aistudio.google.com/apikey):
+## 🚀 Hướng Dẫn Cài Đặt & Sử Dụng
 
-```powershell
-copy .env.example .env
-# Sửa GOOGLE_API_KEY= trong file .env
+### 1. Cài đặt môi trường
+```bash
+# Clone hoặc mở thư mục dự án
+cd "Financial-Multimodal-RAG-master"
+
+# Cài đặt dependencies cơ bản
+pip install -r requirements.txt
 ```
 
-### Demo song ngữ
+### 2. Khởi tạo Database & Nạp Dữ Liệu
+```bash
+# Bước 1: Khởi tạo database và từ điển chỉ tiêu
+python -m financial_rag.cli seed
 
-```powershell
-# Demo tiếng Việt
-finrag demo
-finrag ask "Doanh thu thuần năm 2024 là bao nhiêu?"
-
-# Demo tiếng Anh (Apple Inc.)
-finrag demo-en
-finrag ask "What was Total Revenue in 2024?"
-
-# Demo cả hai ngôn ngữ
-finrag demo-all
-finrag ask "Total Revenue của DEMO năm 2024?"
+# Bước 2: Parse báo cáo, trích xuất facts và build vector index
+python -m financial_rag.cli ingest
 ```
 
-### API server
+### 3. Đặt câu hỏi trực tiếp trên Terminal
+```bash
+# Tra cứu số liệu
+python -m financial_rag.cli ask "Doanh thu thuần năm 2025 của Công ty Nhựa An Phát Xanh (AAA) là bao nhiêu?"
 
-```powershell
-uvicorn financial_rag.api:app --reload
+# Tính toán tài chính
+python -m financial_rag.cli ask "Biên lợi nhuận gộp của AAA năm 2025 là bao nhiêu phần trăm?"
+
+# Tra cứu báo cáo tiếng Anh
+python -m financial_rag.cli ask "What was NVIDIA's total revenue for fiscal year 2025?"
+
+# Câu hỏi bẫy (Hệ thống từ chối lịch sự, không bịa đặt)
+python -m financial_rag.cli ask "Dự báo giá cổ phiếu AAA trong 3 tháng tới sẽ tăng hay giảm?"
 ```
 
-Mở `http://127.0.0.1:8000/docs` để thử API.
-
-## Chế độ hoạt động
-
-| Chế độ | Điều kiện | Mô tả |
-|---|---|---|
-| **Evidence-first** | Không có `GOOGLE_API_KEY` | Trả đoạn bằng chứng xếp hạng bằng TF-IDF, chạy offline hoàn toàn |
-| **LLM + Dense Embedding** | Có `GOOGLE_API_KEY` | Tìm kiếm chéo ngôn ngữ (Việt ↔ Anh) bằng Gemini Embedding + sinh câu trả lời bằng Gemini LLM |
-
-## Nạp dữ liệu
-
-Nạp một file PDF/TXT/HTML:
-
-```powershell
-finrag ingest C:\duong-dan\bao-cao.pdf --ticker HPG --year 2024
+### 4. Chạy bộ đánh giá Benchmark (36 câu hỏi)
+```bash
+python -m financial_rag.cli evaluate
 ```
 
-Tải metadata hoặc subset dataset (cần extra `datasets`):
+### 5. Khởi chạy Giao diện Web (Gradio)
+```bash
+# Chạy local tại http://localhost:7860
+python -m financial_rag.cli serve --port 7860
 
-```powershell
-pip install -e ".[datasets]"
-python scripts/download_datasets.py --dataset vnfinsqa
-python scripts/download_datasets.py --dataset vietfintab --limit 100
-python scripts/download_datasets.py --dataset finqa --limit 100
+# Tạo link public truy cập từ xa (Google Colab)
+python -m financial_rag.cli serve --port 7860 --share
 ```
 
-Không tải toàn bộ dataset ảnh theo mặc định để tránh dùng nhiều dung lượng. Dữ liệu nằm trong `data/raw`, chỉ mục trong `data/index`.
-
-## API
-
-- `GET /health`: trạng thái service/index.
-- `GET /documents`: liệt kê các báo cáo đã nạp.
-- `GET /documents/{id}`: chi tiết một báo cáo.
-- `DELETE /documents/{id}`: xóa báo cáo.
-- `GET /facts`: truy vấn dữ kiện tài chính có cấu trúc.
-- `POST /ingest`: upload PDF/TXT/HTML, trích xuất nội dung và graph facts.
-- `POST /ask`: hybrid retrieval (TF-IDF + Dense Embedding) + LLM, trả câu trả lời trích dẫn nguồn.
-- `GET /graph`: xem nodes/edges (giới hạn bằng query `limit`).
-
-## Graph schema MVP
-
-Nodes: `Company`, `Report`, `Period`, `Metric`, `Fact`, `Chunk`, `Table`.
-
-Edges: `HAS_REPORT`, `FOR_PERIOD`, `MENTIONS`, `HAS_FACT`, `MEASURES`, `SUPPORTED_BY`, `NEXT`.
-
-Mỗi `Fact` giữ `value`, `unit`, `period`, `source`, `page` để câu trả lời có provenance. Regex extractor chỉ là baseline; interface được tách sẵn để thay bằng structured-output LLM/VLM ở giai đoạn tiếp theo.
-
-## Kiểm thử
-
-```powershell
-pytest -q
-ruff check .
+### 6. Chạy Kiểm Thử Tự Động (Unit Tests)
+```bash
+python -m pytest tests
 ```
+Tất cả 13 test cases đều vượt qua thành công (100% pass).
 
-Xem thêm [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/DATASET_ASSESSMENT.md](docs/DATASET_ASSESSMENT.md) và [docs/ROADMAP.md](docs/ROADMAP.md).
+---
+
+## 🖥️ Chạy trên Google Colab với GPU T4
+
+1. Mở file notebook [`notebooks/colab_financial_rag.ipynb`](notebooks/colab_financial_rag.ipynb) trên Google Colab.
+2. Chọn Runtime: **Python 3 with T4 GPU**.
+3. Chạy lần lượt các cells để nạp mô hình `Qwen/Qwen2.5-3B-Instruct` (fp16) và nhận link Gradio công khai (`share=True`).

@@ -1,0 +1,2 @@
+Parsing PDF document: 20151231 10K.pdf
+pdfplumber opened 137 pages.

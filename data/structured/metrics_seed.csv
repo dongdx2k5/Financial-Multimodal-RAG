@@ -1,0 +1,17 @@
+code,name_vi,name_en,statement,is_common,aliases
+net_revenue,Doanh thu thuần về bán hàng và cung cấp dịch vụ,Net revenue,IS,1,Doanh thu thuần|Doanh thu bán hàng và cung cấp dịch vụ|Doanh thu|Net revenue|Revenue|Total revenue|Net sales
+cogs,Giá vốn hàng bán,Cost of goods sold,IS,1,Giá vốn hàng bán|Giá vốn|Cost of goods sold|COGS|Cost of revenue
+gross_profit,Lợi nhuận gộp về bán hàng và cung cấp dịch vụ,Gross profit,IS,1,Lợi nhuận gộp|Lợi nhuận gộp bán hàng|Gross profit|Gross margin
+operating_profit,Lợi nhuận thuần từ hoạt động kinh doanh,Operating income,IS,1,Lợi nhuận thuần từ hoạt động kinh doanh|Lợi nhuận HĐKD|Operating income|Operating profit|Operating income (loss)
+financial_income,Doanh thu hoạt động tài chính,Financial income,IS,1,Doanh thu hoạt động tài chính|Doanh thu tài chính|Financial income|Finance income
+financial_expense,Chi phí tài chính,Financial expenses,IS,1,Chi phí tài chính|Financial expenses|Finance costs
+net_profit,Lợi nhuận sau thuế thu nhập doanh nghiệp,Net income,IS,1,Lợi nhuận sau thuế|LNST|Lợi nhuận sau thuế TNDN|Lãi sau thuế|Net income|Net profit|Net profit after tax|Profit for the year|Net income (loss)
+total_assets,Tổng cộng tài sản,Total assets,BS,1,Tổng tài sản|Tổng cộng tài sản|Total assets|Assets
+current_assets,Tài sản ngắn hạn,Current assets,BS,1,Tài sản ngắn hạn|TSNH|Current assets|Total current assets
+non_current_assets,Tài sản dài hạn,Non-current assets,BS,1,Tài sản dài hạn|TSDH|Non-current assets|Total non-current assets
+total_liabilities,Nợ phải trả,Total liabilities,BS,1,Nợ phải trả|Tổng nợ phải trả|Nợ|Total liabilities|Liabilities
+current_liabilities,Nợ ngắn hạn,Current liabilities,BS,1,Nợ ngắn hạn|Current liabilities|Total current liabilities
+equity,Vốn chủ sở hữu,Total stockholders' equity,BS,1,Vốn chủ sở hữu|VCSH|Tổng vốn chủ sở hữu|Stockholders' equity|Total equity|Shareholders' equity|Equity|Total shareholders' equity
+cash_and_equivalents,Tiền và các khoản tương đương tiền,Cash and cash equivalents,BS,1,Tiền và các khoản tương đương tiền|Tiền và tương đương tiền|Tiền mặt|Cash and cash equivalents|Cash
+charter_capital,Vốn góp của chủ sở hữu,Common stock / Charter capital,BS,1,Vốn góp của chủ sở hữu|Vốn điều lệ|Charter capital|Contributed capital|Common stock
+operating_cash_flow,Lưu chuyển tiền thuần từ hoạt động kinh doanh,Net cash flows from operating activities,CF,1,Lưu chuyển tiền thuần từ hoạt động kinh doanh|Dòng tiền HĐKD|Cash flows from operating activities|Net cash provided by operating activities

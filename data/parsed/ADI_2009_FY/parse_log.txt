@@ -1,0 +1,2 @@
+Parsing PDF document: e10vk.pdf
+pdfplumber opened 102 pages.

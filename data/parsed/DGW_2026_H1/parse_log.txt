@@ -1,0 +1,3 @@
+Parsing PDF document: 20260827 - DGW - Bao cao tai chinh_Hop nhat_6T2026_(signed).pdf
+pdfplumber opened 53 pages.
+Warning: Low text volume detected, document may be scanned.

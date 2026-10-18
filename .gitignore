@@ -1,14 +1,63 @@
-.venv/
+# Byte-compiled / optimized / DLL files
 __pycache__/
-.pytest_cache/
-.ruff_cache/
-.env
-data/raw/**
-data/processed/**
-data/index/**
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-!data/index/.gitkeep
-*.pyc
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project data artifacts
+data/structured/*.db
 *.db
+*.db-journal
+scratch/
+data/index/faiss.index
+data/index/chunk_ids.json
+data/index/embeddings.npy
+data/index/*.npy
+!data/index/.gitkeep
+
+# Test generated artifacts
+data/raw/FAIL_*
+data/raw/DEMO_*
+data/raw/*_nvda_report.txt
+data/parsed/DEMO_*
+data/parsed/FAIL_*
+
+
+# Environment variables
+.env
+
+# Pytest & caches
+.pytest_cache/
+.coverage
+htmlcov/
 

@@ -1,0 +1,2 @@
+Parsing PDF document: 20260827 - BSR - Bao cao tai chinh Hop nhat giua nien do da duoc soat xet.pdf
+pdfplumber opened 52 pages.

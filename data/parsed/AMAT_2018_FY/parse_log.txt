@@ -1,0 +1,2 @@
+Parsing PDF document: Document1.pdf
+pdfplumber opened 107 pages.

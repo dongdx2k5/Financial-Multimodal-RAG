@@ -1,0 +1,2 @@
+Parsing text file: NVDA_2025_FY_nvda_report.txt
+Successfully extracted 1 pages.

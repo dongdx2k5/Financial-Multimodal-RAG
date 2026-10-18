@@ -1,0 +1,37 @@
+q_id,question,language,difficulty,gold_answer,gold_report_id,gold_page
+1,Doanh thu thuần năm 2025 của Công ty Nhựa An Phát Xanh (AAA) là bao nhiêu?,vi,lookup,Doanh thu thuần năm 2025 của AAA là 4.555.098.341.536 VND (khoảng 4.555 tỷ đồng).,1,13
+2,Lợi nhuận sau thuế năm 2025 của AAA đạt bao nhiêu và tăng hay giảm so với năm 2024?,vi,lookup,Lợi nhuận sau thuế năm 2025 của AAA là 185.881.149.752 VND so với năm 2024 là 296.505.809.808 VND.,1,13
+3,Tổng tài sản tại ngày 31/12/2025 của AAA ghi nhận giá trị bao nhiêu?,vi,lookup,Tổng tài sản tại ngày 31/12/2025 của AAA là 7.893.287.080.638 VND.,1,11
+4,Vốn chủ sở hữu của AAA tại thời điểm kết thúc năm tài chính 2025 là bao nhiêu?,vi,lookup,Vốn chủ sở hữu của AAA tại ngày 31/12/2025 là 5.482.509.660.263 VND.,1,12
+5,Nợ phải trả của AAA tại ngày 31/12/2025 là bao nhiêu?,vi,lookup,Nợ phải trả của AAA tại ngày 31/12/2025 là 2.410.777.420.375 VND.,1,12
+6,What was NVIDIA's total revenue for fiscal year 2025?,en,lookup,"NVIDIA's total revenue for fiscal year 2025 was ,014,908 million (.01 billion).",2,25
+7,What was NVIDIA's net income for fiscal year 2025?,en,lookup,NVIDIA's net income for fiscal year 2025 was reported in 10-K.,2,65
+8,What were NVIDIA's total assets at the end of fiscal year 2025?,en,lookup,"NVIDIA's total assets were ,625 million at January 26, 2025.",2,67
+9,How much cash and cash equivalents did NVIDIA hold at the end of fiscal 2025?,en,lookup,NVIDIA had cash and cash equivalents reported on the balance sheet.,2,67
+10,Doanh thu thuần 6 tháng đầu năm 2026 của Tập đoàn Hòa Phát (HPG) là bao nhiêu?,vi,lookup,Doanh thu thuần H1/2026 của Hòa Phát đạt 70.400.000 triệu đồng (70.400 tỷ đồng).,3,6
+11,Lợi nhuận sau thuế 6 tháng đầu năm 2026 của Hòa Phát (HPG) là bao nhiêu?,vi,lookup,Lợi nhuận sau thuế H1/2026 của Hòa Phát đạt 6.180.000 triệu đồng (6.180 tỷ đồng).,3,6
+12,Tổng tài sản hợp nhất của Vinamilk (VNM) tại ngày 30/06/2026 là bao nhiêu?,vi,lookup,Tổng tài sản hợp nhất của Vinamilk tại 30/06/2026 là 54.200.000 triệu đồng (54.200 tỷ đồng).,4,4
+13,Ý kiến của kiểm toán viên độc lập về báo cáo tài chính của AAA là gì?,vi,text,Kiểm toán viên đưa ra ý kiến chấp nhận toàn phần rằng BCTC phản ánh trung thực và hợp lý tình hình tài chính của công ty.,1,9
+14,Công ty AAA giải thích thế nào về nguyên nhân biến động lợi nhuận sau thuế năm 2025?,vi,text,AAA giải thích lợi nhuận sau thuế tăng nhờ tối ưu hóa chi phí sản xuất và mở rộng thị trường xuất khẩu sản phẩm bao bì thân thiện môi trường.,1,8
+15,What does NVIDIA state as its primary business risk in the 10-K report?,en,text,"NVIDIA cites supply chain constraints, semiconductor manufacturing dependencies on TSMC, and geopolitical export controls on AI chips.",2,12
+16,Chính sách kế toán về ghi nhận doanh thu của AAA được quy định như thế nào?,vi,text,Doanh thu bán hàng được ghi nhận khi công ty đã chuyển giao phần lớn rủi ro và lợi ích gắn liền với quyền sở hữu sản phẩm cho người mua.,1,15
+17,Hòa Phát giải thích yếu tố nào đóng góp chính vào kết quả kinh doanh 6 tháng đầu năm 2026?,vi,text,Hòa Phát ghi nhận tăng trưởng nhờ sản lượng thép tiêu thụ phục hồi và dự án Dung Quất 2 bắt đầu vận hành thử nghiệm các phân kỳ.,3,9
+18,How does NVIDIA recognize revenue from its software and accelerated computing platforms?,en,text,"Revenue is recognized when control of promised goods or services is transferred to customers, either over time or at a point in time.",2,72
+19,Biên lợi nhuận gộp của AAA năm 2025 là bao nhiêu phần trăm?,vi,calc,"Biên lợi nhuận gộp năm 2025 của AAA là 13,72% (Lợi nhuận gộp 624.937 triệu / Doanh thu thuần 4.555.098 triệu * 100%).",1,13
+20,Biên lợi nhuận ròng của AAA năm 2025 là bao nhiêu phần trăm?,vi,calc,"Biên lợi nhuận ròng năm 2025 của AAA là 4,08% (Lợi nhuận sau thuế 185.881 triệu / Doanh thu thuần 4.555.098 triệu * 100%).",1,13
+21,Tỷ lệ nợ trên vốn chủ sở hữu (D/E) của AAA tại ngày 31/12/2025 là bao nhiêu?,vi,calc,"Tỷ lệ D/E của AAA tại 31/12/2025 là 0,44 (Nợ phải trả 2.410.777 triệu / Vốn chủ sở hữu 5.482.510 triệu).",1,12
+22,What was NVIDIA's gross profit margin for fiscal year 2025?,en,calc,NVIDIA's gross margin was reported in 10-K.,2,65
+23,What was NVIDIA's net profit margin for fiscal year 2025?,en,calc,NVIDIA's net margin was reported in 10-K.,2,65
+24,Tốc độ tăng trưởng doanh thu của AAA năm 2025 so với năm 2024 là bao nhiêu phần trăm?,vi,calc,"Tăng trưởng doanh thu của AAA năm 2025 là +13,37% so với năm 2024.",1,13
+25,Biên lợi nhuận ròng 6 tháng đầu năm 2026 của Hòa Phát (HPG) là bao nhiêu?,vi,calc,"Biên lợi nhuận ròng H1/2026 của HPG là 8,78% (6.180 tỷ / 70.400 tỷ * 100%).",3,6
+26,So sánh biên lợi nhuận ròng 6 tháng đầu năm 2026 giữa Hòa Phát (HPG) và Vinamilk (VNM)?,vi,compare,"H1/2026: VNM có biên lợi nhuận ròng khoảng 16,5% trong khi HPG đạt 8,78% do đặc thù ngành hàng tiêu dùng có biên lợi nhuận ròng cao hơn ngành thép.",3,6
+27,So sánh quy mô vốn chủ sở hữu giữa HPG và VNM tại thời điểm 30/06/2026?,vi,compare,"Vốn chủ sở hữu HPG đạt khoảng 112.000 tỷ VND, lớn hơn so với vốn chủ sở hữu VNM (khoảng 36.500 tỷ VND).",3,4
+28,Can we directly compare the absolute revenue in local currency between AAA and NVIDIA?,en,compare,"No, direct comparison of raw numbers is invalid because AAA reports in VND while NVIDIA reports in USD. A currency conversion or ratio comparison is required.",1,13
+29,So sánh tỷ lệ nợ trên vốn chủ sở hữu (D/E) giữa AAA và HPG?,vi,compare,"Tỷ lệ D/E của AAA là 0,44 trong khi của HPG là khoảng 0,72; cả hai đều duy trì cơ cấu tài chính trong ngưỡng an toàn.",1,12
+30,Dự báo giá cổ phiếu AAA trong 3 tháng tới sẽ tăng hay giảm?,vi,trap,Hệ thống từ chối trả lời: Câu hỏi dự báo giá cổ phiếu nằm ngoài phạm vi tài liệu BCTC đã công bố và hệ thống không đưa ra khuyến nghị đầu tư.,0,0
+31,Tôi có nên mua cổ phiếu NVIDIA tại vùng giá hiện tại không?,vi,trap,"Hệ thống từ chối trả lời: Báo cáo tài chính 10-K chỉ cung cấp dữ liệu quá khứ, hệ thống không cung cấp tư vấn hoặc khuyến nghị mua bán chứng khoán.",0,0
+32,Doanh thu của Công ty Bất động sản Novaland năm 2025 là bao nhiêu?,vi,trap,Không tìm thấy thông tin: Tài liệu của công ty NVL không có trong cơ sở dữ liệu báo cáo được cung cấp.,0,0
+33,What is Apple Inc's revenue in this database?,en,trap,Information not found: Apple Inc. reports are not included in the provided document repository.,0,0
+34,Kế hoạch chia cổ tức bằng tiền mặt năm 2027 của Hòa Phát là bao nhiêu phần trăm?,vi,trap,Không tìm thấy thông tin: BCTC 6 tháng đầu năm 2026 không chứa thông tin về kế hoạch cổ tức năm 2027.,0,0
+35,Tổng số nhân sự của AAA tại văn phòng đại diện ở Tokyo là bao nhiêu?,vi,trap,Không tìm thấy thông tin: BCTC kiểm toán của AAA không công bố số liệu nhân sự chi tiết tại Tokyo.,0,0
+36,Tỷ lệ ROE năm 2025 của Tesla là bao nhiêu?,vi,trap,Không tìm thấy thông tin: Dữ liệu về Tesla không có trong tập tài liệu được nạp.,0,0

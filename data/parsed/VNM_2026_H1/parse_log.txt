@@ -1,0 +1,2 @@
+Parsing text file: VNM_2026_H1_consolidated_vi.txt
+Successfully extracted 5 pages.

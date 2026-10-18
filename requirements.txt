@@ -1,0 +1,20 @@
+# Core dependencies (compatible with local Python and Colab)
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+pandas>=2.0.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+pymupdf>=1.24.0
+pdfplumber>=0.11.0
+typer>=0.12.0
+rich>=13.0.0
+python-dotenv>=1.0.0
+pytest>=8.0.0
+
+# Optional / Colab T4 dependencies for full LLM + Dense embeddings + Gradio UI:
+# torch>=2.2.0
+# transformers>=4.42.0
+# accelerate>=0.30.0
+# sentence-transformers>=3.0.0
+# faiss-cpu>=1.8.0
+# gradio>=4.40.0
