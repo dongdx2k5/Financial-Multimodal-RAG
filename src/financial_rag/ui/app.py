@@ -31,9 +31,9 @@ def create_gradio_app(engine: FinancialRAGEngine, repo: FinancialRepository):
     except ImportError:
         raise ImportError("Gradio is not installed. Install with `pip install gradio`.")
 
-    def handle_ask(query: str, history: List[Tuple[str, str]]):
-        if not query.strip():
-            return history, "", "Vui lòng nhập câu hỏi.", ""
+    def handle_ask(query: str, history: Optional[List[Any]] = None):
+        if not query or not query.strip():
+            return history or [], "", "Vui lòng nhập câu hỏi.", ""
 
         response = engine.answer_question(query)
 
@@ -53,8 +53,14 @@ def create_gradio_app(engine: FinancialRAGEngine, repo: FinancialRepository):
             if response.verification.get("warning"):
                 meta_info += f"  > {response.verification.get('warning')}\n"
 
-        history = history or []
-        history.append((query, ans_md))
+        history = list(history or [])
+        # Support both Gradio 5+ (messages format: list of dicts) and legacy Gradio (tuples)
+        if getattr(chatbot, "type", None) == "tuples" or (history and isinstance(history[0], (list, tuple))):
+            history.append((query, ans_md))
+        else:
+            history.append({"role": "user", "content": query})
+            history.append({"role": "assistant", "content": ans_md})
+
         return history, "", citations_md, meta_info
 
     def load_facts(ticker_filter: str):
@@ -88,7 +94,10 @@ def create_gradio_app(engine: FinancialRAGEngine, repo: FinancialRepository):
             with gr.Tab("💬 Hỏi Đáp Báo Cáo (QA)"):
                 with gr.Row():
                     with gr.Column(scale=7):
-                        chatbot = gr.Chatbot(height=520, label="Hội thoại BCTC")
+                        try:
+                            chatbot = gr.Chatbot(height=520, label="Hội thoại BCTC", type="messages")
+                        except TypeError:
+                            chatbot = gr.Chatbot(height=520, label="Hội thoại BCTC")
                         with gr.Row():
                             query_input = gr.Textbox(
                                 placeholder="Đặt câu hỏi về BCTC (ví dụ: Doanh thu thuần của AAA năm 2025 là bao nhiêu?)...",
