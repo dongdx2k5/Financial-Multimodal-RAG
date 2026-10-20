@@ -30,14 +30,14 @@ class DenseRetriever:
     def __init__(
         self,
         repo: FinancialRepository,
-        model_name: str = "BAAI/bge-m3",
+        model_name: Optional[str] = None,
         index_path: Optional[Union[str, Path]] = None,
         chunk_ids_path: Optional[Union[str, Path]] = None,
-        device: str = "cpu",
+        device: Optional[str] = None,
     ):
         self.repo = repo
-        self.model_name = model_name
-        self.device = device
+        self.model_name = model_name or settings.embedding_model
+        self.device = device or settings.embedding_device
         self.index_path = Path(index_path) if index_path else settings.resolve_path(settings.faiss_index_path)
         self.chunk_ids_path = Path(chunk_ids_path) if chunk_ids_path else settings.resolve_path(settings.chunk_ids_path)
 
