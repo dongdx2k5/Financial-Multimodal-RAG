@@ -38,9 +38,13 @@ def normalize_metric(raw: str) -> str:
 
 
 class FinancialFactExtractor:
-    """Deterministic baseline. Replace with a structured-output LLM/VLM adapter later."""
+    """Deterministic extraction with source provenance; no language-model calls."""
 
     def extract(self, chunk: Chunk) -> list[FinancialFact]:
+        # Experimental structure recognition is evidence, not an approved financial mapping.
+        # Merged headers / period semantics must be validated before arithmetic is allowed.
+        if chunk.table_structure_engine or chunk.ocr_engine == "vietocr":
+            return []
         if chunk.financial_rows:
             return [
                 FinancialFact(

@@ -1,11 +1,12 @@
 import hashlib
+import json
 import re
 from pathlib import Path
 
 import pymupdf
 from bs4 import BeautifulSoup
 
-from .models import Chunk, Document, PageContent
+from .models import Chunk, Document, OCRSpan, PageContent, StructuredTable
 
 PAGE_MARKER = re.compile(r"^=====\s*PAGE\s+(\d+)\s*=====\s*$", re.MULTILINE | re.IGNORECASE)
 
@@ -22,12 +23,176 @@ class DocumentLoader:
         tessdata=None,
         cache_dir=None,
         best_tessdata=None,
+        *,
+        ocr_backend="tesseract",
+        fallback_to_tesseract=True,
+        vietocr_weights=None,
+        detector_path=None,
+        table_backend="none",
+        table_model_path=None,
     ):
         self.ocr_enabled = ocr_enabled
         self.ocr_language = ocr_language
         self.tessdata = tessdata
         self.cache_dir = cache_dir
         self.best_tessdata = best_tessdata
+        if ocr_backend not in {"tesseract", "vietocr"}:
+            raise ValueError("Unsupported OCR backend")
+        if table_backend not in {"none", "slanet_plus"}:
+            raise ValueError("Unsupported table backend")
+        self.ocr_backend = ocr_backend
+        self.fallback_to_tesseract = fallback_to_tesseract
+        self.vietocr_weights = vietocr_weights
+        self.detector_path = detector_path
+        self.table_backend = table_backend
+        self.table_model_path = table_model_path
+        self._vietocr = None
+        self._table_model = None
+
+    def _cache_signature(self):
+        def identity(path):
+            if not path:
+                return None
+            p = Path(path).resolve()
+            if not p.exists():
+                return [str(p), "missing"]
+            stat = p.stat()
+            return [str(p), stat.st_size, stat.st_mtime_ns]
+
+        config = [
+            "v5-ocr-tables",
+            self.ocr_enabled,
+            self.ocr_language,
+            self.ocr_backend,
+            self.fallback_to_tesseract,
+            identity(self.tessdata),
+            identity(self.best_tessdata),
+            identity(self.vietocr_weights),
+            identity(self.detector_path),
+            self.table_backend,
+            identity(self.table_model_path),
+        ]
+        return hashlib.sha256(json.dumps(config).encode()).hexdigest()[:20]
+
+    def _tesseract(self, page):
+        tp = page.get_textpage_ocr(
+            language=self.ocr_language, dpi=300, full=True, tessdata=self.tessdata
+        )
+        return (
+            page.get_text("text", textpage=tp, sort=True),
+            page.get_text("words", textpage=tp),
+        )
+
+    def _extract_page(self, page) -> tuple[PageContent, bool]:
+        """Return content and whether it is safe to cache (no transient fallback)."""
+        text = page.get_text("text", sort=True)
+        words = page.get_text("words")
+        method, engine = "text", None
+        spans, warnings = [], []
+        cacheable = True
+        image_area = max(
+            (pymupdf.Rect(item["bbox"]).get_area() for item in page.get_image_info()),
+            default=0,
+        )
+        needs_ocr = len(text.strip()) < 30 or (
+            len(text.strip()) < 500 and image_area > page.rect.get_area() * 0.65
+        )
+        if needs_ocr and self.ocr_enabled:
+            try:
+                if self.ocr_backend == "vietocr":
+                    from .ocr_backends import VietOCRBackend
+
+                    if self._vietocr is None:
+                        self._vietocr = VietOCRBackend(
+                            weights_path=self.vietocr_weights,
+                            detector_path=self.detector_path,
+                            device="cpu",
+                        )
+                    result = self._vietocr.extract(page, dpi=300)
+                    spans = [
+                        OCRSpan(text=s.text, bbox=list(s.bbox), confidence=s.confidence)
+                        for s in result.lines
+                    ]
+                    if not any(s.text.strip() for s in spans):
+                        raise RuntimeError("VietOCR không nhận được dòng chữ nào")
+                    text = "\n".join(s.text for s in spans)
+                    # Preserve whole-line boxes; never invent positions of individual words.
+                    words = [[*s.bbox, s.text, 0, n, 0] for n, s in enumerate(spans)]
+                    warnings.extend(result.warnings)
+                    engine = "vietocr"
+                else:
+                    text, words = self._tesseract(page)
+                    engine = "tesseract"
+                method = "ocr"
+            except (ImportError, RuntimeError, ValueError, OSError) as exc:
+                cacheable = False
+                warnings.append(f"Trang {page.number + 1}: {self.ocr_backend} thất bại: {exc}")
+                if self.ocr_backend == "vietocr" and not self.fallback_to_tesseract:
+                    raise RuntimeError(warnings[-1]) from exc
+                if self.ocr_backend == "vietocr" and self.fallback_to_tesseract:
+                    try:
+                        text, words = self._tesseract(page)
+                        method, engine = "ocr", "tesseract"
+                        spans = []
+                        warnings.append(f"Trang {page.number + 1}: đã dùng Tesseract dự phòng.")
+                    except (RuntimeError, ValueError, OSError) as fallback_exc:
+                        warnings.append(f"Tesseract dự phòng thất bại: {fallback_exc}")
+        elif needs_ocr:
+            warnings.append(
+                f"Trang {page.number + 1}: ít văn bản; cần bật OCR nếu đây là trang scan."
+            )
+        tables, table_bboxes = [], []
+        try:
+            for table in page.find_tables().tables:
+                tables.append(table.extract())
+                table_bboxes.append(list(table.bbox))
+        except (RuntimeError, ValueError, TypeError):
+            warnings.append(f"Trang {page.number + 1}: không trích xuất được bảng gốc.")
+        content = PageContent(
+            page=page.number + 1,
+            text=re.sub(r"[^\S\n]{2,}", " ", text),
+            tables=tables,
+            table_bboxes=table_bboxes,
+            warnings=warnings,
+            words=words,
+            width=page.cropbox.width,
+            height=page.cropbox.height,
+            extraction_method=method,
+            ocr_engine=engine,
+            ocr_lines=spans,
+        )
+        from .financial_tables import statement_kind
+
+        if engine == "tesseract" and self.best_tessdata and statement_kind(text):
+            try:
+                secondary = page.get_textpage_ocr(
+                    language=self.ocr_language, dpi=300, full=True, tessdata=self.best_tessdata
+                )
+                content.secondary_words = [
+                    list(word) for word in page.get_text("words", textpage=secondary)
+                ]
+            except (RuntimeError, ValueError, OSError):
+                cacheable = False
+                content.warnings.append(f"Trang {content.page}: OCR bổ sung không thành công.")
+        if engine == "tesseract":
+            from .ocr_recovery import recover_codes
+
+            recover_codes(page, content, self.tessdata)
+        if self.table_backend == "slanet_plus":
+            try:
+                from .table_structure import SLANetTableBackend
+
+                if self._table_model is None:
+                    self._table_model = SLANetTableBackend(model_path=self.table_model_path)
+                lines = spans or [OCRSpan(text=w[4], bbox=list(w[:4])) for w in words]
+                found = self._table_model.extract_tables(page, lines, regions=table_bboxes or None)
+                content.structured_tables = [StructuredTable.model_validate(t) for t in found]
+                for table in content.structured_tables:
+                    content.warnings.extend(table.warnings)
+            except (ImportError, RuntimeError, ValueError, OSError) as exc:
+                cacheable = False
+                content.warnings.append(f"Trang {content.page}: nhận cấu trúc bảng thất bại: {exc}")
+        return content, cacheable
 
     def load(
         self, path: Path, ticker: str | None = None, year: int | None = None, progress=None
@@ -73,10 +238,7 @@ class DocumentLoader:
         cache_root = None
         if self.cache_dir:
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            cache_root = (
-                Path(self.cache_dir)
-                / f"{digest}-{self.ocr_language}-300-v4-{self.ocr_enabled}-{bool(self.best_tessdata)}"
-            )
+            cache_root = Path(self.cache_dir) / f"{digest}-{self._cache_signature()}"
             cache_root.mkdir(parents=True, exist_ok=True)
         with pymupdf.open(path) as pdf:
             if pdf.needs_pass:
@@ -88,81 +250,13 @@ class DocumentLoader:
                     content = PageContent.model_validate_json(
                         cache_file.read_text(encoding="utf-8")
                     )
-                    from .ocr_recovery import recover_codes
-
-                    recover_codes(page, content, self.tessdata)
-                    cache_file.write_text(content.model_dump_json(), encoding="utf-8")
                     pages.append(content)
                     if progress:
                         progress(i + 1, len(pdf))
                     continue
-                text = page.get_text("text", sort=True)
-                words = page.get_text("words")
-                method = "text"
-                warnings = []
-                image_area = max(
-                    (pymupdf.Rect(item["bbox"]).get_area() for item in page.get_image_info()),
-                    default=0,
-                )
-                if len(text.strip()) < 30 or (
-                    len(text.strip()) < 500 and image_area > page.rect.get_area() * 0.65
-                ):
-                    if self.ocr_enabled:
-                        try:
-                            tp = page.get_textpage_ocr(
-                                language=self.ocr_language,
-                                dpi=300,
-                                full=True,
-                                tessdata=self.tessdata,
-                            )
-                            text = page.get_text("text", textpage=tp, sort=True)
-                            words = page.get_text("words", textpage=tp)
-                            method = "ocr"
-                        except (RuntimeError, ValueError, OSError):
-                            warnings.append(
-                                f"Trang {i + 1}: OCR thất bại; kiểm tra tessdata vie/eng."
-                            )
-                    else:
-                        warnings.append(
-                            f"Trang {i + 1}: ít văn bản; cần bật OCR nếu đây là trang scan."
-                        )
-                try:
-                    tables = [table.extract() for table in page.find_tables().tables]
-                except (RuntimeError, ValueError, TypeError):
-                    tables = []
-                    warnings.append(f"Trang {i + 1}: không trích xuất được bảng.")
-                # Remove huge spacing artifacts emitted by OCR while retaining lines.
-                text = re.sub(r"[^\S\n]{2,}", " ", text)
-                content = PageContent(
-                    page=i + 1,
-                    text=text,
-                    tables=tables,
-                    warnings=warnings,
-                    words=words,
-                    width=page.rect.width,
-                    height=page.rect.height,
-                    extraction_method=method,
-                )
-                from .financial_tables import statement_kind
-
-                if method == "ocr" and self.best_tessdata and statement_kind(text):
-                    try:
-                        secondary = page.get_textpage_ocr(
-                            language=self.ocr_language,
-                            dpi=300,
-                            full=True,
-                            tessdata=self.best_tessdata,
-                        )
-                        content.secondary_words = [
-                            list(word) for word in page.get_text("words", textpage=secondary)
-                        ]
-                    except (RuntimeError, ValueError, OSError):
-                        content.warnings.append(f"Trang {i + 1}: OCR bổ sung không thành công.")
-                from .ocr_recovery import recover_codes
-
-                recover_codes(page, content, self.tessdata)
+                content, cacheable = self._extract_page(page)
                 pages.append(content)
-                if cache_file:
+                if cache_file and cacheable:
                     cache_file.write_text(content.model_dump_json(), encoding="utf-8")
                 if progress:
                     progress(i + 1, len(pdf))
@@ -199,7 +293,16 @@ class Chunker:
 
         chunks: list[Chunk] = []
         for page in document.pages:
-            rows, warnings = extract_statement(page, document)
+            if page.ocr_engine == "vietocr":
+                # Legacy column parsing expects word boxes. A detected line can
+                # span multiple numeric columns; never concatenate those values.
+                rows, warnings = [], [
+                    "VietOCR thử nghiệm: chỉ truy xuất bằng chứng; chưa tạo dữ kiện để tính toán."
+                ]
+            else:
+                rows, warnings = extract_statement(page, document)
+            for row in rows:
+                row.ocr_engine = page.ocr_engine
             chunks.extend(rows)
             page.warnings.extend(warnings)
             units = set(
@@ -222,8 +325,37 @@ class Chunker:
                         year=document.year,
                         table=table,
                         table_unit=table_unit,
+                        bbox=page.table_bboxes[index] if index < len(page.table_bboxes) else None,
+                        scope=document.scope,
+                        extraction_method=page.extraction_method,
+                        ocr_engine=page.ocr_engine,
                     )
                 )
+            for index, table in enumerate(page.structured_tables):
+                # Keep row/column/span provenance explicit, without guessing financial semantics.
+                text = "\n".join(
+                    f"[hàng {c.row + 1}, cột {c.col + 1}; ô gộp {c.row_span}x{c.col_span}] {c.text}"
+                    for c in table.cells
+                    if c.text.strip()
+                )
+                if text:
+                    chunks.append(
+                        Chunk(
+                            id=_stable_id(document.id, page.page, "structure", index),
+                            document_id=document.id,
+                            source=document.source,
+                            page=page.page,
+                            text=text,
+                            ticker=document.ticker,
+                            year=document.year,
+                            scope=document.scope,
+                            bbox=table.bbox,
+                            extraction_method=page.extraction_method,
+                            ocr_engine=page.ocr_engine,
+                            table_structure_engine=table.engine,
+                            table_cells=table.cells,
+                        )
+                    )
             clean = re.sub(r"\s+", " ", page.text).strip()
             start = 0
             while start < len(clean):
@@ -246,6 +378,7 @@ class Chunker:
                             year=document.year,
                             scope=document.scope,
                             extraction_method=page.extraction_method,
+                            ocr_engine=page.ocr_engine,
                         )
                     )
                 if end >= len(clean):

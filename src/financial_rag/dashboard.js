@@ -6,7 +6,7 @@
   panel.append(make('h2','Tổng quan có bằng chứng'),make('small','Đang chọn báo cáo…'));
   document.querySelector('main > div').prepend(panel);
   const system=make('section');system.append(make('h2','Trạng thái xử lý'));
-  const runtime=make('p','Đang kiểm tra Ollama…');
+  const runtime=make('p','Đang kiểm tra ứng dụng…');
   const recent=make('div');const reload=make('button','Làm mới trạng thái');reload.className='secondary';
   system.append(runtime,reload,recent);document.querySelector('aside').append(system);
   const graphPanel=make('section');graphPanel.append(make('h2','Graph theo báo cáo'));
@@ -18,7 +18,7 @@
   function source(fact,id) {
     const button=make('button',`Nguồn · trang ${fact.page}`);button.className='secondary';
     button.onclick=()=>{
-      document.getElementById('viewerTitle').textContent=`Trang PDF ${fact.page} · vùng bằng chứng`;
+      document.getElementById('viewerTitle').textContent=`Trang PDF ${fact.page} · ${fact.bbox?'vùng bằng chứng màu cam':'chưa có tọa độ vùng, hãy đối chiếu trang gốc'}`;
       const img=document.getElementById('sourceImage');
       img.onerror=()=>{document.getElementById('viewerTitle').textContent='Không tải được ảnh trang. Hãy mở tài liệu gốc.';};
       img.src=`/documents/${encodeURIComponent(id)}/pages/${fact.page}?chunk_id=${encodeURIComponent(fact.chunk_id)}`;
@@ -29,8 +29,8 @@
   async function status(){
     reload.disabled=true;
     try{
-      const health=await json('/health/ollama');
-      runtime.textContent=`${health.model} · ${health.busy?'đang xử lý':health.ready?'sẵn sàng':'chưa sẵn sàng'} — ${health.message}`;
+      const health=await json('/health');
+      runtime.textContent=`Hỏi đáp theo luật · không gọi LLM · ${health.chunks} chunk trong chỉ mục`;
       const jobs=await json('/jobs');recent.replaceChildren();
       const labels={complete:'Hoàn tất',running:'Đang đọc',queued:'Đang chờ',failed:'Thất bại',interrupted:'Bị gián đoạn'};
       if(!jobs.length)recent.append(make('small','Chưa có lịch sử nạp nền.'));

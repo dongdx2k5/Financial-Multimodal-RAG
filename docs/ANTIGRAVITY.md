@@ -1,7 +1,7 @@
 # Chạy dự án trong Antigravity trên Windows
 
 Antigravity dùng để mở/chỉnh sửa mã nguồn và chạy terminal. Backend vẫn là Python/FastAPI,
-model chạy trong Ollama riêng. Không cần đổi dự án sang framework khác.
+hỏi đáp theo luật và công thức, không cần Ollama. Không cần đổi framework.
 
 ## 1. Mở đúng thư mục
 
@@ -30,12 +30,10 @@ Hai lệnh kiểm tra phải trả `True` nếu đang dùng môi trường đã 
 Nếu chưa có `.venv`/`.env`, thực hiện phần máy mới trước khi chạy script.
 
 Khi Uvicorn chạy, mở [http://127.0.0.1:8000/](http://127.0.0.1:8000/).
-Giữ terminal mở; **Ctrl+C** dừng web, không nhất thiết dừng Ollama nền.
+Giữ terminal mở; **Ctrl+C** dừng web.
 Nếu cổng 8000 đã có server của dự án đang chạy, dùng server đó, không mở thêm bản thứ hai.
 
-`start-local.ps1` dùng Ollama tại `C:\DXD\Ollama` hoặc PATH và đặt kho
-`C:\DXD\OllamaModels` khi phải khởi động server. Nếu model ở kho khác, dùng cách chạy
-Ollama/Uvicorn riêng trong [README](../README.md#cài-đặt-trên-windows).
+`start-local.ps1` chỉ khởi động Uvicorn bằng `.venv`; không khởi động Ollama.
 
 ## 3. Máy mới hoặc vừa clone GitHub
 
@@ -44,12 +42,12 @@ Làm đủ các bước [cài đặt trong README](../README.md#cài-đặt-trê
 1. Clone nhánh `main` vào thư mục riêng, mở folder đó trong Antigravity.
 2. Cài Python 3.11, tạo `.venv`, chạy `pip install -e .` bằng Python trong `.venv`.
 3. Chép `.env.example` sang `.env` **chỉ nếu chưa có `.env`**.
-4. Cài/mở Ollama, tải `qwen2.5:3b` và kiểm tra `ollama list`.
+4. Không cần tải model chat hoặc cấu hình API key.
 5. Chạy Uvicorn bằng Python của `.venv`, không cần activate.
 6. Nếu PDF scan, cài tessdata, bật OCR và restart theo [phần OCR](../README.md#bật-ocr-cho-pdf-scan).
 
 Không cần `npm install`, Docker, Neo4j hoặc OpenAI key cho luồng này.
-Ollama không tự có model chỉ vì đã clone repository.
+PDF scan vẫn cần bộ ngôn ngữ OCR; dữ liệu PDF/index không đi kèm repository.
 
 ## 4. Python interpreter và lệnh chạy
 
@@ -79,15 +77,14 @@ Trong terminal khác khi web đã chạy:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/health
-Invoke-RestMethod http://127.0.0.1:8000/health/ollama
 ```
 
-`/health` kiểm tra ứng dụng/chỉ mục; `/health/ollama` mới kiểm tra model local.
-Upload PDF, chọn đúng báo cáo, đợi xử lý xong rồi hỏi. Bật LLM khi muốn diễn giải;
-các phép tính hỗ trợ vẫn dùng calculator.
+`/health` cần trả `answer_policy=deterministic` và `llm_enabled=false`.
+Upload PDF, chọn đúng báo cáo, đợi xử lý xong rồi hỏi một chỉ tiêu/kỳ cụ thể.
+Phép tính dùng calculator; xem [phạm vi hỏi đáp](DETERMINISTIC_QA.md).
 
 Không đọc được PDF scan thì kiểm tra OCR trước — đổi model chat không thay thế OCR.
-Thiếu citation hoặc model bận có thể dẫn đến trả bằng chứng gốc kèm cảnh báo.
+Nhãn “Chỉ có đoạn liên quan” nghĩa là chưa có câu trả lời được bộ luật xác định.
 
 ## 6. Sau khi sửa code hoặc cấu hình
 
@@ -96,7 +93,7 @@ Thiếu citation hoặc model bận có thể dẫn đến trả bằng chứng 
 - Chỉ chạy một server ghi cùng kho `data`; không CLI ingest song song với web.
 - Không chép `.env.example` đè cấu hình OCR/model đang dùng.
 - Không upload `.env`, PDF riêng tư hoặc OCR/index lên GitHub.
-- Đưa tài liệu vào chat/agent IDE là luồng riêng với backend Ollama local;
+- Đưa tài liệu vào chat/agent IDE là luồng riêng với backend local;
   xem quyền/provider của IDE trước khi gửi dữ liệu nhạy cảm.
 
 Xem thêm [bảng xử lý lỗi](../README.md#xử-lý-lỗi-thường-gặp).

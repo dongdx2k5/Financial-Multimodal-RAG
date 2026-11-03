@@ -23,9 +23,9 @@ def ingest(path: Path, ticker: str | None = None, year: int | None = None) -> No
 
 
 @app.command()
-def ask(question: str, top_k: int = 5) -> None:
+def ask(question: str, top_k: int = 5, document_id: str | None = None) -> None:
     """Ask a question against the local hybrid index."""
-    typer.echo(_service().ask(question, top_k).model_dump_json(indent=2))
+    typer.echo(_service().ask(question, top_k, document_id).model_dump_json(indent=2))
 
 
 @app.command()

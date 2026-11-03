@@ -16,7 +16,7 @@ def fake_service():
             document_id="report",
             source="report.pdf",
             page=8,
-            text="Tổng tài sản",
+            text=f"Tổng tài sản: {date}: {value} VND",
             financial_rows=[{"value": value}],
         )
         fact = FinancialFact(

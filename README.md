@@ -2,7 +2,11 @@
 
 Ứng dụng local đọc hiểu báo cáo tài chính tiếng Việt: tải PDF lên, trích xuất văn bản/bảng,
 chuyển số liệu thành đồ thị tri thức, tìm bằng chứng và trả lời kèm nguồn theo trang.
-Mặc định dùng **Ollama (`qwen2.5:3b`)**, không cần OpenAI API key.
+Hỏi đáp **không gọi LLM/Ollama/OpenAI**: dùng bộ luật, công thức và mẫu trả lời có nguồn.
+Không cần API key hoặc tải model chat. OCR cho PDF scan mặc định dùng Tesseract.
+Có [nhánh thử nghiệm VietOCR + nhận cấu trúc bảng SLANet_plus](docs/OCR_EXPERIMENT.md),
+chạy trong môi trường và kho dữ liệu riêng, chưa thay mặc định.
+Xem [phạm vi hỏi đáp, mẫu câu và trạng thái kết quả](docs/DETERMINISTIC_QA.md).
 
 Đây là MVP phục vụ nghiên cứu và hỗ trợ đọc báo cáo, không phải công cụ kiểm toán
 hay tư vấn đầu tư. Luôn đối chiếu số liệu quan trọng với PDF gốc.
@@ -32,9 +36,9 @@ hay tư vấn đầu tư. Luôn đối chiếu số liệu quan trọng với PD
 | Số liệu | Chỉ tiêu, giá trị, đơn vị, kỳ, phạm vi riêng/hợp nhất, trang và vùng bằng chứng |
 | Kiểm tra | Công thức kế toán, đối chiếu số dư tiền, cảnh báo dữ liệu thiếu/không khớp |
 | Tổng quan | Doanh thu, lợi nhuận, tài sản, vốn chủ sở hữu, dòng tiền, tiền cuối kỳ; tăng trưởng và biên lợi nhuận khi đủ dữ liệu |
-| Hỏi đáp | Facts có cấu trúc và calculator; tìm kiếm TF-IDF kết hợp graph; Ollama diễn giải theo bằng chứng |
+| Hỏi đáp | Facts + calculator + mẫu trả lời; TF-IDF/graph trả đoạn liên quan khi chưa có luật đủ để trả lời |
 | Truy nguồn | Mở PDF/trang/vùng nguồn; xem quan hệ Metric → Fact → Chunk; xuất phân tích JSON |
-| Vận hành | Nạp nền, tiến độ từng trang, lịch sử tác vụ và kiểm tra Ollama |
+| Vận hành | Nạp nền, tiến độ từng trang, lịch sử tác vụ và trạng thái ứng dụng |
 
 ```text
 PDF / TXT / HTML / MD
@@ -52,13 +56,8 @@ Knowledge Graph G = (V, E) + chỉ mục TF-IDF
         ▼
 Câu hỏi + báo cáo được chọn
         ├── Số liệu / phép tính hỗ trợ → facts + calculator
-        └── Câu hỏi diễn giải → retrieval → Ollama (nếu bật)
-                                             │
-                                             ▼
-                                   Kiểm tra trích dẫn / số liệu
-                                             │
-                                             ▼
-                        Câu trả lời + nguồn, hoặc bằng chứng gốc
+        └── Câu chưa có luật → retrieval → đoạn trích, ghi rõ chưa kết luận
+                              Không gọi mô hình sinh câu trả lời
 ```
 
 `V` gồm Company, Report, Period, Metric, Fact, Chunk. `E` lưu quan hệ sở hữu báo cáo,
@@ -73,12 +72,11 @@ Xem [kiến trúc chi tiết và schema](docs/ARCHITECTURE.md).
 
 - Python **3.11** là phiên bản dùng kiểm thử; package khai báo Python từ 3.11.
 - Git để clone/cập nhật mã nguồn.
-- [Ollama trên Windows](https://docs.ollama.com/windows) nếu muốn dùng LLM local.
-  Không cần Ollama để trích xuất, xem nguồn và hỏi số liệu đã nhận diện được.
-- Internet cho lần cài thư viện, tải model và bộ ngôn ngữ OCR. Sau khi tải đủ,
-  luồng xử lý local không cần gọi dịch vụ LLM bên ngoài.
+- Không cần Ollama hoặc OpenAI SDK để chạy hỏi đáp.
+- Internet cho lần cài thư viện và bộ ngôn ngữ OCR. Sau khi tải đủ,
+  luồng xử lý tài liệu và hỏi đáp chạy local.
 - Máy đã chạy thử: i5-1240P, RAM 16 GB, Intel Iris Xe. Đây không phải cấu hình tối thiểu
-  được bảo đảm; OCR/suy luận CPU có thể chậm. Client Ollama hiện đặt `num_gpu=0`.
+  được bảo đảm; OCR CPU có thể chậm.
 
 Repository **không chứa** `.venv`, `.env`, Ollama executable, model, PDF người dùng
 hoặc kho chỉ mục đã nạp. Máy mới phải cài môi trường và nạp tài liệu lại.
@@ -117,23 +115,9 @@ if (-not (Test-Path -LiteralPath .env)) {
 }
 ```
 
-Không ghi đè `.env` đang dùng. Cấu hình mẫu đã chọn Ollama; không cần điền API key.
+Không ghi đè `.env` đang dùng; không cần điền API key.
 
-### 3. Chuẩn bị Ollama
-
-Cài và mở ứng dụng Ollama, mở lại terminal nếu lệnh chưa có trong PATH.
-Tải [model qwen2.5:3b](https://ollama.com/library/qwen2.5:3b) một lần:
-
-```powershell
-ollama pull qwen2.5:3b
-ollama list
-Invoke-RestMethod http://127.0.0.1:11434/api/tags
-```
-
-Nếu Ollama chưa chạy, dùng `ollama serve` trong một terminal riêng, giữ terminal đó mở
-rồi chạy các lệnh trên ở terminal khác. Không chạy thêm `serve` nếu cổng 11434 đã có Ollama.
-
-### 4. Khởi động web
+### 3. Khởi động web — không cần Ollama
 
 ```powershell
 cd C:\DXD\Multimodal-RAG-Financial
@@ -142,7 +126,7 @@ cd C:\DXD\Multimodal-RAG-Financial
 
 - Giao diện: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
 - Thử API: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-- Kiểm tra model: [http://127.0.0.1:8000/health/ollama](http://127.0.0.1:8000/health/ollama)
+- Kiểm tra ứng dụng: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
 
 Giữ terminal chạy, nhấn **Ctrl+C** để dừng web. Chỉ dùng **một server worker**;
 không chạy nhiều tiến trình cùng ghi vào `data`.
@@ -154,16 +138,13 @@ cd C:\DXD\Multimodal-RAG-Financial
 powershell -ExecutionPolicy Bypass -File .\start-local.ps1
 ```
 
-Script tìm Ollama tại `C:\DXD\Ollama\ollama.exe`, sau đó mới tìm trong PATH.
-Nếu phải khởi động Ollama, script đặt kho model là `C:\DXD\OllamaModels`.
-**Máy mới nên dùng cách chạy thủ công ở trên**: model đã tải vào kho mặc định có thể
-không xuất hiện khi script chuyển sang kho `C:\DXD\OllamaModels`.
-Script không tự cài Python packages, tải model hoặc cài OCR.
+Script chạy Python của `.venv` trong chính thư mục dự án, không khởi động Ollama.
+Script không tự cài Python packages hoặc OCR.
 
 ## Chạy trong Antigravity
 
 Mở thư mục chứa `pyproject.toml` và `README.md`, rồi chạy các lệnh PowerShell phía trên.
-Antigravity là môi trường mở/chỉnh sửa dự án; ứng dụng vẫn chạy bằng Python và Ollama.
+Antigravity là môi trường mở/chỉnh sửa dự án; ứng dụng chạy bằng Python/FastAPI.
 Không cần `npm install` hoặc API key chỉ để chạy ứng dụng này.
 
 Xem [hướng dẫn Antigravity từng bước](docs/ANTIGRAVITY.md): mở project,
@@ -202,13 +183,14 @@ Bộ đọc bảng hiện tập trung vào báo cáo Việt Nam hai cột kỳ, 
 3. Xem tổng quan, facts và cảnh báo chất lượng. Giá trị thiếu/không khớp cần kiểm tra nguồn.
 4. Đặt câu hỏi phù hợp tài liệu, ví dụ “Doanh thu thuần quý 1 năm 2026 là bao nhiêu?”,
    “Biên lợi nhuận gộp quý 1 năm 2026?”, “Báo cáo quy định khi nào ghi nhận doanh thu bán hàng?”.
-5. Bật tùy chọn LLM/Ollama nếu muốn diễn giải. Câu hỏi số liệu được hỗ trợ vẫn ưu tiên
-   facts/calculator, không nhất thiết gọi model dù đã bật LLM.
+5. Đọc nhãn kết quả: đã trả lời / chỉ có đoạn liên quan / cần làm rõ / chưa đủ bằng chứng.
+   Mở “Cách tạo kết quả” để xem các bước xử lý. Câu hỏi chính sách chỉ trả đoạn liên quan,
+   chưa tự xác định điều kiện hay nguyên nhân.
 6. Mở nguồn theo trang/vùng PDF, xem graph hoặc tải JSON phân tích để kiểm tra tiếp.
 
 Số trang nguồn là vị trí trang PDF tính từ 1, có thể khác số trang in trên báo cáo.
-Ollama lỗi, bận hoặc phản hồi không vượt qua bộ kiểm tra sẽ trả bằng chứng gốc kèm cảnh báo.
-Đây là hành vi dự kiến, không có tự động chuyển sang OpenAI.
+Chỉ đánh dấu vùng màu cam khi chunk có tọa độ; nếu thiếu tọa độ, xem trang và đoạn trích.
+Kết quả tìm kiếm không được coi là câu trả lời đã xác minh. Câu ngoài phạm vi sẽ không được đoán.
 
 ## Cấu hình
 
@@ -216,10 +198,6 @@ Ollama lỗi, bận hoặc phản hồi không vượt qua bộ kiểm tra sẽ 
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `LLM_PROVIDER` | `ollama` | Provider; chỉ đổi khi chủ động muốn dùng provider khác |
-| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Endpoint local; client từ chối địa chỉ ngoài localhost |
-| `OLLAMA_MODEL` | `qwen2.5:3b` | Model đã tải trên Ollama server đang chạy |
-| `OLLAMA_TIMEOUT` | `180` | Timeout gọi model, tính bằng giây |
 | `OCR_ENABLED` | `false` | Bật OCR cho trang scan |
 | `OCR_LANGUAGE` | `vie+eng` | Ngôn ngữ OCR đã cài |
 | `TESSDATA_PREFIX` | Chưa đặt | Thư mục chứa các file ngôn ngữ OCR |
@@ -227,8 +205,8 @@ Ollama lỗi, bận hoặc phản hồi không vượt qua bộ kiểm tra sẽ 
 | `DATA_DIR` | `<repo>/data` | Kho dữ liệu local; nên dùng đường dẫn tuyệt đối nếu đổi |
 
 `EMBEDDING_MODEL` có trong cấu hình cũ nhưng chưa dùng để tạo dense embeddings.
-Provider OpenAI là tùy chọn riêng, cần extra `llm`, khóa và có thể phát sinh phí API;
-không cần cho luồng Ollama. Cài SDK không tự bật provider hoặc tự gọi API.
+Các cấu hình `LLM_PROVIDER`, `OLLAMA_*`, `OPENAI_*` được giữ để tương thích với
+client/thử nghiệm cũ, **không bật được LLM trong `/ask`**. Không cần extra `llm`.
 
 ## API và dòng lệnh
 
@@ -236,8 +214,8 @@ Schema request/response đầy đủ nằm trong `/docs` khi server đang chạy
 
 | Endpoint | Chức năng |
 |---|---|
-| `GET /health` | Provider/model cấu hình và kích thước chỉ mục; không xác nhận Ollama sẵn sàng |
-| `GET /health/ollama` | Kiểm tra kết nối, model đã cài và trạng thái bận |
+| `GET /health` | `answer_policy=deterministic`, `llm_enabled=false`, kích thước chỉ mục |
+| `GET /health/ollama` | Chẩn đoán client cũ tùy chọn; giao diện hỏi đáp không gọi endpoint này |
 | `POST /ingest` | Multipart `file`, tùy chọn `ticker`, `year`, `background=true` để nạp nền |
 | `GET /jobs`, `GET /jobs/{job_id}` | Lịch sử và tiến độ nạp |
 | `GET /documents` | Danh sách báo cáo và ID |
@@ -246,7 +224,7 @@ Schema request/response đầy đủ nằm trong `/docs` khi server đang chạy
 | `GET /documents/{id}/graph` | Graph theo báo cáo; `limit` tối đa 1.000 node |
 | `GET /documents/{id}/file` | Tài liệu gốc đã lưu |
 | `GET /documents/{id}/pages/{page}` | Ảnh PNG của trang PDF; `chunk_id` tùy chọn để đánh dấu nguồn |
-| `POST /ask` | `question`, `document_id`, `top_k` (1–20), `use_llm` |
+| `POST /ask` | `question`, `document_id`, `top_k` (1–20); `use_llm` cũ bị bỏ qua kèm cảnh báo |
 | `POST /calculate` | `operation`: `growth`, `difference`, `ratio`; hai fact ID |
 | `GET /graph` | Graph toàn kho, giới hạn mặc định 500 |
 
@@ -275,8 +253,9 @@ hai tiến trình ghi cùng kho; khởi động lại web sau đó để đọc 
 .\.venv\Scripts\python.exe -m financial_rag.cli ingest "C:\duong-dan\bao-cao.pdf" --ticker VNM --year 2026
 ```
 
-CLI `ask` hiện hỏi toàn chỉ mục, không có tùy chọn bật LLM/lọc báo cáo;
-dùng UI/API nếu cần các tùy chọn đó. Demo là dữ liệu giả lập, không phải báo cáo thật.
+CLI `ask` nhận `--document-id ID`. Nếu có nhiều báo cáo mà không chọn ID, hệ thống yêu cầu
+chọn báo cáo; nếu chỉ có một báo cáo thì tự chọn. Demo là dữ liệu giả lập, không phải báo cáo thật;
+dữ kiện regex trong TXT hiện chỉ hỗ trợ truy xuất đoạn, không tự được coi là fact bảng chuẩn.
 
 ## Cấu trúc dự án
 
@@ -291,7 +270,7 @@ src/financial_rag/
   graph.py, retrieval.py         NetworkX graph và TF-IDF + graph retrieval
   answers.py, calculator.py      Hỏi số liệu và phép tính
   quality.py, analytics.py       Kiểm tra kế toán và tổng quan
-  ollama_client.py               Gọi model local, kiểm tra phản hồi
+  ollama_client.py               Client cũ độc lập, không được service.ask gọi
   service.py, config.py          Điều phối và cấu hình
   storage.py, jobs.py            Ghi JSON và tác vụ nền
 scripts/                        Cài OCR, tải dataset, kiểm thử báo cáo/Ollama
@@ -333,11 +312,10 @@ Script xuất JSONL vào `data/raw`; **chưa tự nạp JSONL vào graph hoặc 
 
 ## Kiểm thử
 
-Cài extras cho bộ test đầy đủ; `llm` cần cho các test giả lập SDK của provider tùy chọn,
-không yêu cầu API key hay gọi dịch vụ trả phí:
+Cài extra cho bộ test; không yêu cầu API key, Ollama hoặc gọi dịch vụ trả phí:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[dev,llm]"
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe -m ruff check src tests scripts
 ```
@@ -348,14 +326,11 @@ Bộ test không thay cho việc đánh giá độ chính xác trên nhiều lo�
 Kiểm thử tùy chọn trên dữ liệu thật đã nạp; thay `$reportId` bằng ID từ `GET /documents`:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/smoke_ollama.py --document-id $reportId
 # Chỉ dành cho đúng báo cáo VNM RIÊNG Q1/2026 dùng trong bộ hồi quy:
 .\.venv\Scripts\python.exe scripts/evaluate_vnm.py --document-id $reportId
 ```
 
-- Smoke test gọi Ollama thật, lưu kết quả/thời gian/lý do fallback vào `work/ollama-smoke.json`.
-  Nếu không có câu trả lời LLM nào được chấp nhận, script báo lỗi; đọc lý do fallback
-  trước khi kết luận model không chạy.
+- `smoke_ollama.py` cũ đã ngừng dùng; hỏi đáp không còn gọi mô hình sinh.
 - Bộ VNM có 18 tình huống cố định. Báo cáo từng kiểm tra có 55 trang, trích 44 dòng bảng chuẩn;
   PDF không đi kèm Git và không được script tự tải. Không dùng bộ này cho báo cáo khác.
 - Đây là kiểm thử chọn lọc, không phải cam kết chính xác cho mọi số liệu hoặc mọi PDF.
@@ -367,13 +342,11 @@ Kiểm thử tùy chọn trên dữ liệu thật đã nạp; thay `$reportId` b
 | Không có `py` / sai Python | Chạy `python --version`; cài Python 3.11 và mở lại terminal |
 | Thiếu `financial_rag` / `uvicorn` | Đứng ở gốc repo, cài `-m pip install -e .` bằng `.venv\Scripts\python.exe` |
 | Chặn `Activate.ps1` | Không cần activate; dùng trực tiếp `.venv\Scripts\python.exe` |
-| Không có lệnh `ollama` | Cài Ollama/mở lại terminal; máy cài riêng có thể dùng `& 'C:\DXD\Ollama\ollama.exe' list` |
+| Không có lệnh `ollama` | Không cần cài: hỏi đáp hiện không dùng Ollama |
 | Cổng 8000 đang được dùng | Dùng server đang chạy hoặc Ctrl+C đúng terminal cũ; nếu đổi `--port 8001`, mở URL tương ứng |
-| Cổng 11434 đang được dùng | Kiểm tra `/api/tags`; thường Ollama đã chạy, không cần mở thêm `serve` |
-| Không thấy model | Chạy `ollama list`, `ollama pull qwen2.5:3b`; kiểm tra `.env` và kho model của server |
 | PDF scan không có nội dung | Bật OCR, kiểm tra hai file ngôn ngữ/đường dẫn trong `.env`, restart rồi nạp lại |
 | Hỏi đáp chậm lúc OCR | Ingest giữ khóa kho dữ liệu; đợi hoàn tất rồi hỏi. Xem tiến độ qua `/jobs` |
-| LLM timeout / trả bằng chứng | Xem cảnh báo và `/health/ollama`, giải phóng RAM; có thể tăng `OLLAMA_TIMEOUT` rồi restart |
+| Chỉ có đoạn liên quan | Câu hỏi chưa thuộc bộ luật hoặc chưa có fact bảng chuẩn; không phải đã trả lời |
 | Job `interrupted` sau restart | Nạp lại cùng tài liệu và metadata; OCR cache có thể được dùng lại, không tự resume |
 | Thiếu số liệu cho kỳ hỏi | Chọn đúng báo cáo/kỳ/phạm vi; hệ thống không tự suy dữ liệu không có trong nguồn |
 
@@ -390,10 +363,10 @@ Kiểm thử tùy chọn trên dữ liệu thật đã nạp; thay `$reportId` b
   Công thức khớp không có nghĩa OCR đúng hoặc báo cáo đã được kiểm toán.
 - Calculator từ chối kỳ/phạm vi/đơn vị không tương thích, chia cho 0 và tăng trưởng với nền âm.
   Chưa hỗ trợ so sánh tự do nhiều báo cáo hoặc lập chương trình tài chính tổng quát.
-- Bộ kiểm tra Ollama kiểm tra trích dẫn/số liệu, **không chứng minh đúng ngữ nghĩa**;
-  có thể từ chối cả làm tròn hợp lệ. Câu hỏi nguyên nhân được xử lý bảo thủ, không tự kết luận.
+- Không có LLM không đồng nghĩa luôn đúng: OCR, ánh xạ mã dòng và luật vẫn có thể sai.
+  Chưa trả lời tự động về danh sách HĐQT, nguyên nhân hay suy luận mở; chỉ truy xuất đoạn liên quan.
 - Dữ liệu và `.env` được gitignore nhưng vẫn tồn tại trên máy. Không commit PDF, OCR,
   export JSON hoặc khóa bí mật. Khi sao lưu, dừng tiến trình ghi và giữ cả cấu hình lẫn dữ liệu.
-- Chế độ Ollama không tự chuyển cloud. Nếu dùng provider ngoài hoặc đưa tài liệu vào trợ lý AI
-  của IDE, cần xem nơi dữ liệu được gửi; điều đó tách biệt với backend local này.
+- Hỏi đáp không gửi dữ liệu đến LLM. Đưa tài liệu vào trợ lý AI của IDE là luồng khác;
+  cần xem nơi dữ liệu được gửi trước khi sử dụng.
 

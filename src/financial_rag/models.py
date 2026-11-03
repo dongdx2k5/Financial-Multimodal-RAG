@@ -3,6 +3,32 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class OCRSpan(BaseModel):
+    """A detected line, not an invented per-word bounding box."""
+
+    text: str
+    bbox: list[float] = Field(min_length=4, max_length=4)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class TableCell(BaseModel):
+    row: int = Field(ge=0)
+    col: int = Field(ge=0)
+    row_span: int = Field(default=1, ge=1)
+    col_span: int = Field(default=1, ge=1)
+    text: str
+    bbox: list[float] = Field(min_length=4, max_length=4)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class StructuredTable(BaseModel):
+    bbox: list[float] = Field(min_length=4, max_length=4)
+    cells: list[TableCell] = Field(default_factory=list)
+    engine: str = "slanet_plus"
+    region_source: str = "unknown"
+    warnings: list[str] = Field(default_factory=list)
+
+
 class PageContent(BaseModel):
     page: int
     text: str
@@ -15,6 +41,10 @@ class PageContent(BaseModel):
     secondary_words: list[list[Any]] = Field(default_factory=list)
     recovered_codes: list[dict[str, Any]] = Field(default_factory=list)
     code_recovery_version: int = 0
+    ocr_engine: str | None = None
+    ocr_lines: list[OCRSpan] = Field(default_factory=list)
+    structured_tables: list[StructuredTable] = Field(default_factory=list)
+    table_bboxes: list[list[float]] = Field(default_factory=list)
 
 
 class Document(BaseModel):
@@ -42,6 +72,9 @@ class Chunk(BaseModel):
     bbox: list[float] | None = None
     extraction_method: str = "text"
     financial_rows: list[dict[str, Any]] = Field(default_factory=list)
+    table_structure_engine: str | None = None
+    table_cells: list[TableCell] = Field(default_factory=list)
+    ocr_engine: str | None = None
 
 
 class FinancialFact(BaseModel):
@@ -95,6 +128,11 @@ class AskResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     llm_model: str | None = None
     llm_elapsed_seconds: float | None = None
+    answer_status: Literal[
+        "answered", "evidence_only", "needs_clarification", "insufficient_evidence"
+    ] = "evidence_only"
+    reason_code: str = ""
+    steps: list[str] = Field(default_factory=list)
 
 
 class GraphExport(BaseModel):

@@ -107,38 +107,25 @@ def test_pdf_table_is_extracted(tmp_path):
     assert [(f.period, f.value) for f in facts] == [(2024, 1250), (2023, 1000)]
 
 
-def test_llm_adapter_and_invalid_citation_fallback(tmp_path, monkeypatch):
+def test_openai_configuration_cannot_enable_generation(tmp_path, monkeypatch):
+    import sys
     from types import SimpleNamespace
-
-    import openai
 
     calls = []
 
     class Client:
         def __init__(self, **kwargs):
-            self.responses = self
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        def create(self, **kwargs):
             calls.append(kwargs)
-            return SimpleNamespace(output_text="Doanh thu 100 tỷ [1].")
+            raise AssertionError("The answering service must never instantiate OpenAI.")
 
-    monkeypatch.setattr(openai, "OpenAI", Client)
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=Client))
     service = FinancialRAGService(
         Settings(data_dir=tmp_path / "data", openai_api_key="test-only", llm_provider="openai")
     )
     path = tmp_path / "report.txt"
     path.write_text("Doanh thu năm 2024 đạt 100 tỷ đồng.", encoding="utf-8")
     service.ingest(path)
-    assert service.ask("Doanh thu", use_llm=True).mode == "llm"
-    assert calls[0]["store"] is False
-    monkeypatch.setattr(
-        Client, "create", lambda self, **kwargs: SimpleNamespace(output_text="Sai [99]")
-    )
     response = service.ask("Doanh thu", use_llm=True)
     assert response.mode == "evidence" and response.warnings
+    assert response.answer_status == "evidence_only"
+    assert calls == []

@@ -10,7 +10,7 @@ from financial_rag.ollama_client import OllamaError, generate, validate_output
 from financial_rag.service import FinancialRAGService
 
 
-def test_local_request_and_service(tmp_path, monkeypatch):
+def test_service_never_calls_ollama_even_when_requested(tmp_path, monkeypatch):
     requests = []
 
     def respond(req, timeout):
@@ -25,9 +25,10 @@ def test_local_request_and_service(tmp_path, monkeypatch):
     path.write_text("Doanh thu năm 2024 đạt 100 tỷ đồng.", encoding="utf-8")
     service.ingest(path)
     result = service.ask("Doanh thu", use_llm=True)
-    assert result.mode == "llm" and "[1]" in result.answer
-    assert requests[0]["stream"] is False
-    assert requests[0]["options"]["num_ctx"] == 4096
+    assert result.mode == "evidence" and "[1]" in result.answer
+    assert result.answer_status == "evidence_only"
+    assert result.warnings and not requests
+    assert result.llm_model is None
 
 
 @pytest.mark.parametrize(

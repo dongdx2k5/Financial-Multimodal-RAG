@@ -53,10 +53,10 @@ def run_ingestion(job_id, path, ticker, year, name):
 def health() -> dict:
     return {
         "status": "ok",
-        "llm_provider": service.settings.llm_provider,
-        "llm_model": service.settings.ollama_model
-        if service.settings.llm_provider == "ollama"
-        else service.settings.openai_model,
+        "answer_policy": "deterministic",
+        "llm_enabled": False,
+        "llm_provider": None,
+        "llm_model": None,
         "chunks": len(service.retriever.chunks),
         "nodes": service.graph.graph.number_of_nodes(),
         "edges": service.graph.graph.number_of_edges(),

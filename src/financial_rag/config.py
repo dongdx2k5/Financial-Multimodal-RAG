@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     ocr_language: str = "vie+eng"
     tessdata_prefix: str | None = None
     tessdata_best_prefix: str | None = None
+    ocr_backend: Literal["tesseract", "vietocr"] = "tesseract"
+    ocr_fallback_to_tesseract: bool = True
+    vietocr_weights: str | None = None
+    ocr_detector_path: str | None = None
+    table_backend: Literal["none", "slanet_plus"] = "none"
+    table_model_path: str | None = None
 
     @property
     def index_dir(self) -> Path:

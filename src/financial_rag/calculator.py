@@ -13,6 +13,8 @@ class CalculationRequest(BaseModel):
 
 
 def calculate(operation: str, left: FinancialFact, right: FinancialFact) -> dict:
+    if operation not in {"growth", "difference", "ratio"}:
+        raise ValueError("Phép tính không được hỗ trợ.")
     if "needs_review" in {left.quality, right.quality}:
         raise ValueError("Số liệu không khớp kiểm tra kế toán; cần đối chiếu nguồn trước khi tính.")
     if left.scope != right.scope or left.period_kind != right.period_kind:
@@ -33,6 +35,8 @@ def calculate(operation: str, left: FinancialFact, right: FinancialFact) -> dict
     elif (left.period_label or str(left.period)) != (right.period_label or str(right.period)):
         raise ValueError("Tỷ số cần hai chỉ tiêu cùng kỳ.")
     a, b = Decimal(str(left.value)), Decimal(str(right.value))
+    if not a.is_finite() or not b.is_finite():
+        raise ValueError("Số liệu không hữu hạn; cần đối chiếu nguồn.")
     if operation != "difference" and b == 0:
         raise ValueError("Không thể chia cho 0.")
     if operation == "growth" and b < 0:
