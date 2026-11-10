@@ -966,14 +966,33 @@ class SmartFinancialPDFParser:
 
     COMPANY_ALIASES: Dict[str, Tuple[str, ...]] = {
         "FPT": ("fpt", "công ty cổ phần fpt", "fpt corporation"),
-        "VNM": ("vinamilk", "sữa việt nam", "vietnam dairy products", "vnm"),
-        "VCB": ("vietcombank", "ngoại thương việt nam", "vcb"),
-        "VIC": ("vingroup", "tập đoàn vingroup", "vic"),
-        "HPG": ("hòa phát", "hoa phat", "hpg"),
-        "MWG": ("thế giới di động", "the gioi di dong", "mwg"),
-        "TCB": ("techcombank", "kỹ thương việt nam", "tcb"),
-        "MBB": ("mb bank", "quân đội", "mbb"),
+        "VNM": ("vinamilk", "sữa việt nam", "sua viet nam", "vietnam dairy products", "vnm"),
+        "VCB": ("vietcombank", "ngoại thương việt nam", "ngoai thuong viet nam", "vcb"),
+        "VIC": ("vingroup", "tập đoàn vingroup", "tap doan vingroup", "vic"),
+        "VHM": ("vinhomes", "công ty cổ phần vinhomes", "vhm"),
+        "HPG": ("hòa phát", "hoa phat", "tập đoàn hòa phát", "hpg"),
+        "MWG": ("thế giới di động", "the gioi di dong", "đầu tư thế giới di động", "mwg"),
+        "TCB": ("techcombank", "kỹ thương việt nam", "ky thuong viet nam", "tcb"),
+        "MBB": ("mbbank", "ngân hàng tmcp quân đội", "ngan hang quan doi", "mbb"),
+        "VPB": ("vpbank", "việt nam thịnh vượng", "viet nam thinh vuong", "vpb"),
+        "ACB": ("ngân hàng á châu", "ngan hang a chau", "acb"),
+        "BID": ("bidv", "đầu tư và phát triển việt nam", "bid"),
+        "CTG": ("vietinbank", "công thương việt nam", "ctg"),
+        "STB": ("sacombank", "sài gòn thương tín", "stb"),
+        "HDB": ("hdbank", "phát triển thành phố hồ chí minh", "hdb"),
+        "MSN": ("masan", "tập đoàn masan", "masan group", "msn"),
+        "SAB": ("sabeco", "bia - rượu - nước giải khát sài gòn", "sab"),
+        "PNJ": ("vàng bạc đá quý phú nhuận", "phu nhuan jewelry", "pnj"),
+        "GAS": ("pv gas", "khí việt nam", "tổng công ty khí việt nam", "gas"),
+        "PLX": ("petrolimex", "xăng dầu việt nam", "plx"),
+        "SSI": ("chứng khoán ssi", "ssi securities", "ssi"),
+        "VND": ("vndirect", "chứng khoán vndirect", "vnd"),
+        "DGC": ("hóa chất đức giang", "duc giang chemicals", "dgc"),
+        "GMD": ("gemadept", "cổ phần gemadept", "gmd"),
+        "REE": ("cơ điện lạnh", "ree corporation", "ree"),
         "NVDA": ("nvidia", "nvidia corporation", "nvda"),
+        "AAPL": ("apple inc", "apple", "aapl"),
+        "MSFT": ("microsoft", "microsoft corporation", "msft"),
         "ADI": ("analog devices", "analog devices, inc"),
     }
 
@@ -999,10 +1018,53 @@ class SmartFinancialPDFParser:
         return False
 
     def detect_company_from_text(self, text: str) -> Optional[str]:
-        norm = normalize_vn_text(text).lower()
+        norm = normalize_vn_text(text)
+        norm_lower = norm.lower()
+
+        # 1. Tìm theo Mã chứng khoán ghi rõ trong báo cáo (ví dụ: "Mã chứng khoán: HPG", "Mã CK: VNM")
+        ticker_match = re.search(
+            r"(?:mã\s*chứng\s*khoán|mã\s*ck|mã\s*cổ\s*phiếu|stock\s*code|ticker)\s*[:\-]?\s*([A-Z]{3,5})",
+            norm,
+            flags=re.I,
+        )
+        if ticker_match:
+            cand = ticker_match.group(1).upper()
+            if cand not in {"VND", "USD", "VAS", "IFRS", "GAAP", "BCTC"}:
+                return cand
+
+        # 2. Tìm theo từ điển COMPANY_ALIASES (ưu tiên tên đầy đủ trước mã 3 chữ cái)
         for code, aliases in self.COMPANY_ALIASES.items():
-            if self._contains_alias(norm, aliases):
+            long_aliases = [a for a in aliases if len(a) > 3]
+            if long_aliases and self._contains_alias(norm_lower, long_aliases):
                 return code
+        for code, aliases in self.COMPANY_ALIASES.items():
+            if self._contains_alias(norm_lower, aliases):
+                return code
+
+        # 3. Trích xuất tên doanh nghiệp trực tiếp từ dòng tiêu đề "CÔNG TY CỔ PHẦN ...", "NGÂN HÀNG TMCP ..."
+        header_match = re.search(
+            r"(?:CÔNG\s+TY\s+CỔ\s+PHẦN|CÔNG\s+TY\s+TNHH|TẬP\s+ĐOÀN|TỔNG\s+CÔNG\s+TY|NGÂN\s+HÀNG\s+TMCP)\s+([^\W_][\w\s\-&]{1,45})",
+            norm,
+        )
+        if header_match:
+            raw_org = header_match.group(1).splitlines()[0].strip()
+            raw_org = re.split(r"(?:BÁO\s+CÁO|Độc\s+lập|Số\s*:|Mã\s*số)", raw_org, flags=re.I)[0].strip(" -–,.")
+            if raw_org:
+                ascii_org = "".join(
+                    c for c in unicodedata.normalize("NFD", raw_org.replace("Đ", "D").replace("đ", "d"))
+                    if unicodedata.category(c) != "Mn"
+                )
+                words = [
+                    w for w in re.findall(r"[A-Z0-9]+", ascii_org.upper())
+                    if w not in {"TAP", "DOAN", "TONG", "CONG", "TY", "CO", "PHAN", "TNHH", "TMCP"}
+                ]
+                if not words:
+                    words = [w for w in re.findall(r"[A-Z0-9]+", ascii_org.upper()) if w]
+                if len(words) == 1 and len(words[0]) <= 12:
+                    return words[0]
+                if len(words) >= 2:
+                    short_slug = "_".join(words[:3])
+                    return short_slug[:16]
         return None
 
     def verify_document_identity(
@@ -1925,57 +1987,89 @@ class UnifiedFinancialRAGPipeline:
         self.ingest_pages(fpt_2023_pages, company="FPT", period="FY2023", strict_identity_check=False)
         self.ingest_pages(fpt_2024_pages, company="FPT", period="FY2024", strict_identity_check=False)
 
+    STOPWORD_FILENAME_TOKENS = {
+        "BCTC", "BAO", "CAO", "TAI", "CHINH", "HOP", "NHAT", "RIENG", "CONG", "TY",
+        "CO", "PHAN", "NAM", "QUY", "Kiem", "TOAN", "SOAT", "XET", "REPORT", "ANNUAL",
+        "FINANCIAL", "STATEMENT", "STATEMENTS", "CONSOLIDATED", "SEPARATE", "SCANNED",
+        "SCAN", "SAMPLE", "FILE", "PDF", "DOC", " FINAL", "V1", "V2", "10K", "10Q",
+    }
+
     def infer_company_and_period(
         self,
         file_path: Union[str, Path],
         first_pages_text: str = "",
-        default_company: str = "FPT",
+        default_company: str = "",
         default_period: str = "FY2024",
     ) -> Tuple[str, str]:
         """
-        Tự động nhận diện Mã Doanh nghiệp và Kỳ báo cáo từ tên file kết hợp với nội dung 3 trang đầu.
+        Tự động nhận diện Mã Doanh nghiệp và Kỳ báo cáo từ:
+        1. Nội dung văn bản của 3 trang đầu tiên (`detect_company_from_text`).
+        2. Bất kỳ token nào trong tên file khớp với từ điển doanh nghiệp hoặc mã chứng khoán 3-4 ký tự.
+        3. Tên file rút gọn (Cleaned Filename Stem) — TUYỆT ĐỐI KHÔNG BAO GIỜ gán bừa thành 'FPT'!
         """
-        stem = Path(file_path).stem.upper()
-        comp_match = re.match(r"^([A-Z]{3,5})(?:[_\-\s]|$)", stem)
+        stem = normalize_vn_text(Path(file_path).stem)
+        stem_upper = stem.upper()
+
+        # Ưu tiên 1: Quét tên công ty / alias ngay trong tên file (ví dụ "BCTC_Vinamilk_2024.pdf" hoặc "2024_BCTC_HPG.pdf")
+        detected_from_filename_alias = self.pdf_parser.detect_company_from_text(stem)
+        tokens = [t for t in re.split(r"[\W_]+", stem_upper) if t]
+        ticker_tokens = [
+            t for t in tokens
+            if re.fullmatch(r"[A-Z]{3,4}", t)
+            and t not in self.STOPWORD_FILENAME_TOKENS
+            and not re.fullmatch(r"FY\d+|Q[1-4]", t)
+        ]
+
+        # Ưu tiên 2: Quét từ nội dung 3 trang đầu của PDF
         detected_from_text = self.pdf_parser.detect_company_from_text(first_pages_text) if first_pages_text else None
 
-        if comp_match and comp_match.group(1) not in {"BCTC", "BAO", "REPORT", "SCAN", "FILE", "TEST"}:
-            company = comp_match.group(1)
-        elif detected_from_text:
+        if detected_from_text:
             company = detected_from_text
+        elif detected_from_filename_alias:
+            company = detected_from_filename_alias
+        elif ticker_tokens:
+            company = ticker_tokens[0]
+        elif default_company.strip():
+            company = default_company.strip().upper()
         else:
-            company = default_company.upper()
+            # Fallback: lấy các từ có nghĩa trong tên file (loại bỏ BCTC, năm, quý) để đặt mã riêng cho tài liệu đó
+            meaningful = [
+                t for t in tokens
+                if t not in self.STOPWORD_FILENAME_TOKENS
+                and not re.fullmatch(r"20\d{2}|19\d{2}|Q[1-4]|FY\d+|\d+", t)
+            ]
+            company = "_".join(meaningful[:2])[:15] if meaningful else "DOC_UPLOADED"
 
-        q_match = re.search(r"(Q[1-4][_\-\s]*20\d{2}|20\d{2}[_\-\s]*Q[1-4])", stem)
-        y_match = re.search(r"(20\d{2})", stem)
+        # Nhận diện kỳ báo cáo (Quý / Năm) từ tên file hoặc nội dung PDF
+        q_match = re.search(r"(Q[1-4][_\-\s]*20\d{2}|20\d{2}[_\-\s]*Q[1-4])", stem_upper)
+        q_text_match = re.search(r"quý\s*([1-4]|i|ii|iii|iv)\s*(?:năm\s*|/\s*)(20\d{2})", (first_pages_text or "").lower())
+        y_match = re.search(r"(20\d{2})", stem_upper)
+
         if q_match:
             period = re.sub(r"[\s_\-]+", "_", q_match.group(1))
+        elif q_text_match:
+            roman_map = {"i": "1", "ii": "2", "iii": "3", "iv": "4"}
+            q_num = roman_map.get(q_text_match.group(1), q_text_match.group(1))
+            period = f"Q{q_num}_{q_text_match.group(2)}"
         elif y_match:
             period = f"FY{y_match.group(1)}"
         else:
-            text_years = sorted(set(re.findall(r"\b(20\d{2})\b", first_pages_text or "")))
+            text_years = sorted(set(re.findall(r"(20\d{2})", first_pages_text or "")))
             period = f"FY{max(text_years)}" if text_years else default_period
         return company, period
 
-    @staticmethod
     def infer_company_and_period_from_filename(
+        self,
         file_path: Union[str, Path],
-        default_company: str = "FPT",
+        default_company: str = "",
         default_period: str = "FY2024",
     ) -> Tuple[str, str]:
-        stem = Path(file_path).stem.upper()
-        comp_match = re.match(r"^([A-Z]{3,5})(?:[_\-\s]|$)", stem)
-        company = comp_match.group(1) if comp_match else default_company.upper()
-
-        q_match = re.search(r"(Q[1-4][_\-\s]*20\d{2}|20\d{2}[_\-\s]*Q[1-4])", stem)
-        y_match = re.search(r"(20\d{2})", stem)
-        if q_match:
-            period = re.sub(r"[\s_\-]+", "_", q_match.group(1))
-        elif y_match:
-            period = f"FY{y_match.group(1)}"
-        else:
-            period = default_period
-        return company, period
+        return self.infer_company_and_period(
+            file_path=file_path,
+            first_pages_text="",
+            default_company=default_company,
+            default_period=default_period,
+        )
 
     def read_pdf_file_to_pages_data(
         self,
@@ -2124,6 +2218,20 @@ class UnifiedFinancialRAGPipeline:
                     )
         return rows
 
+    def clear_database(self) -> None:
+        """Xóa toàn bộ dữ liệu cũ (bao gồm dữ liệu mẫu FPT) trong SQLite để chỉ giữ tài liệu người dùng nạp."""
+        cur = self.store.conn.cursor()
+        cur.executescript(
+            """
+            DELETE FROM facts;
+            DELETE FROM chunks;
+            DELETE FROM chunks_fts;
+            DELETE FROM quality_reports;
+            """
+        )
+        self.store.conn.commit()
+        self.retriever._indexed_chunks.clear()
+
     def ingest_pdf_file(
         self,
         pdf_path: Union[str, Path],
@@ -2136,8 +2244,11 @@ class UnifiedFinancialRAGPipeline:
         early_text = "\n".join(str(p.get("text", "")) for p in pages_data[:3])
         inferred_comp, inferred_period = self.infer_company_and_period(pdf_path, first_pages_text=early_text)
 
-        comp = (company or "").strip().upper() or inferred_comp
-        per = (period or "").strip() or inferred_period
+        user_comp = (company or "").strip().upper()
+        user_per = (period or "").strip()
+
+        comp = user_comp or inferred_comp
+        per = user_per or inferred_period
 
         result = self.ingest_pages(
             pages_data=pages_data,
@@ -2386,49 +2497,53 @@ class UnifiedFinancialRAGPipeline:
 
 
 # ==============================================================================
-# 12. GRADIO UI INTEGRATION FOR GOOGLE COLAB T4 (Có Upload PDF + Auto Sync)
+# 12. GRADIO UI INTEGRATION FOR GOOGLE COLAB T4 (Có Upload PDF + Auto Sync + Clear DB)
 # ==============================================================================
 
 def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
     """
     Giao diện Gradio đầy đủ gồm 2 phần:
-    1. Tải trực tiếp file PDF Báo cáo tài chính (.pdf) lên hệ thống + Tự động nhận diện
-       Mã Doanh nghiệp & Kỳ báo cáo từ tên file/nội dung và đồng bộ xuống ô truy vấn.
+    1. Tải trực tiếp file PDF Báo cáo tài chính (.pdf) lên hệ thống:
+       - Tự động nhận diện đúng Mã Doanh nghiệp & Kỳ báo cáo từ nội dung PDF / tên file (không bao giờ gán bừa thành FPT).
+       - Tự động xóa dữ liệu mẫu FPT (nếu bật checkbox) khi bạn tải tài liệu thật lên.
+       - Tự động đồng bộ Mã Doanh nghiệp, Kỳ báo cáo và Câu hỏi xuống khung truy vấn bên dưới.
     2. Đặt câu hỏi phân tích tài chính, tính tỷ số YoY/ROE/ROA và kiểm toán cân đối BCTC.
-    Nếu cơ sở dữ liệu đang trống khi mở Gradio, tự động nạp sẵn bộ dữ liệu mẫu FPT (FY2023 & FY2024).
     """
     import gradio as gr
-
-    if pipeline.get_database_summary()["total_facts"] == 0:
-        pipeline.seed_default_fpt_data()
 
     def format_db_status() -> str:
         summary = pipeline.get_database_summary()
         if not summary["loaded_reports"]:
-            return "Chưa có báo cáo nào trong DB. Hãy tải file PDF lên ở mục 1 bên dưới."
+            return "Cơ sở dữ liệu đang trống (0 báo cáo). Hãy tải file PDF BCTC của bạn lên ở Mục 1 bên dưới!"
         items = [
             f"{r['company']} ({r['period']}): {r['num_facts']} chỉ tiêu"
             for r in summary["loaded_reports"]
         ]
         return (
-            f"Đã nạp sẵn {summary['total_facts']} chỉ tiêu tài chính & {summary['total_chunks']} đoạn/bảng "
-            f"từ: " + " | ".join(items)
+            f"Đang lưu {summary['total_facts']} chỉ tiêu & {summary['total_chunks']} đoạn/bảng "
+            f"từ các báo cáo: " + " | ".join(items)
         )
 
     def handle_pdf_upload(
         uploaded_files: Any,
         company_override: str,
         period_override: str,
+        clear_old_db_before_upload: bool,
         current_query_company: str,
         current_query_period: str,
-    ) -> Tuple[str, str, str, str]:
+        current_query_text: str,
+    ) -> Tuple[str, str, str, str, str]:
         if not uploaded_files:
             return (
                 "Vui lòng chọn ít nhất 1 file PDF Báo cáo tài chính để nạp.",
                 format_db_status(),
                 current_query_company,
                 current_query_period,
+                current_query_text,
             )
+
+        if clear_old_db_before_upload:
+            pipeline.clear_database()
 
         file_list = uploaded_files if isinstance(uploaded_files, list) else [uploaded_files]
         logs: List[str] = []
@@ -2456,7 +2571,7 @@ def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
                 last_per = res["period"]
                 q_rep = res["quality_report"]
                 logs.append(
-                    f"[THÀNH CÔNG] File '{res['file_name']}' -> Công ty: {res['company']} | Kỳ: {res['period']} | "
+                    f"[THÀNH CÔNG] File '{res['file_name']}' -> Nhận diện Công ty: {res['company']} | Kỳ: {res['period']} | "
                     f"Số trang đọc: {res['pages_read']} | Chỉ tiêu bóc tách: {len(res['facts'])} | "
                     f"Segments/Bảng: {len(res['chunks'])} | Kiểm toán VAS: {q_rep.overall_status.upper()} "
                     f"({q_rep.passed_checks}/{q_rep.total_checks} quy tắc)"
@@ -2464,19 +2579,53 @@ def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
             except Exception as exc:
                 logs.append(f"[LỖI] Không thể nạp file '{Path(f_path).name}': {exc}")
 
-        return "\n".join(logs), format_db_status(), last_comp, last_per
+        # Tự động cập nhật câu hỏi bên dưới theo đúng mã công ty vừa tải lên
+        updated_query = f"Tổng cộng tài sản của {last_comp} kỳ {last_per} là bao nhiêu?"
+        return "\n".join(logs), format_db_status(), last_comp, last_per, updated_query
+
+    def handle_clear_db() -> Tuple[str, str, str, str]:
+        pipeline.clear_database()
+        return (
+            "Đã xóa sạch toàn bộ dữ liệu cũ (bao gồm dữ liệu mẫu FPT) khỏi SQLite.",
+            format_db_status(),
+            "",
+            "FY2024",
+        )
+
+    def handle_seed_fpt() -> Tuple[str, str, str, str, str]:
+        pipeline.seed_default_fpt_data()
+        return (
+            "Đã nạp bộ dữ liệu mẫu FPT (FY2023 & FY2024).",
+            format_db_status(),
+            "FPT",
+            "FY2024",
+            "Tổng cộng tài sản của FPT năm 2024 là bao nhiêu?",
+        )
 
     def handle_qa(query: str, company: str, period: str, comparison_period: str) -> Tuple[str, str, str]:
         comp_period = comparison_period.strip() or None
+        comp_clean = company.strip()
+        per_clean = period.strip()
+
+        # Nếu người dùng để trống ô Mã Doanh nghiệp, tự động lấy doanh nghiệp mới nhất đang có trong DB
+        if not comp_clean:
+            summary = pipeline.get_database_summary()
+            if summary["loaded_reports"]:
+                comp_clean = summary["loaded_reports"][0]["company"]
+                if not per_clean:
+                    per_clean = summary["loaded_reports"][0]["period"]
+
         out = pipeline.answer_question(
             query=query,
-            company=company.strip(),
-            period=period.strip(),
+            company=comp_clean,
+            period=per_clean or "FY2024",
             comparison_period=comp_period,
         )
         ver_str = json.dumps(out.get("verification", {}), ensure_ascii=False, indent=2)
         meta_str = json.dumps(
             {
+                "company_queried": comp_clean,
+                "period_queried": per_clean,
                 "intent": out.get("intent"),
                 "execution_path": out.get("execution_path"),
                 "calculation": out.get("calculation"),
@@ -2487,16 +2636,20 @@ def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
         )
         return out["answer"], ver_str, meta_str
 
+    initial_summary = pipeline.get_database_summary()
+    default_comp = initial_summary["loaded_reports"][0]["company"] if initial_summary["loaded_reports"] else ""
+    default_per = initial_summary["loaded_reports"][0]["period"] if initial_summary["loaded_reports"] else "FY2024"
+
     with gr.Blocks(title="Unified Financial Multimodal RAG (Colab T4)") as demo:
         gr.Markdown("## Hệ thống Financial Multimodal RAG Hợp nhất (Qwen2.5-VL + BGE-M3 + VAS Audit Gate)")
 
         db_status_box = gr.Textbox(
-            label="Trạng thái Cơ sở dữ liệu hiện tại (Đã nạp sẵn dữ liệu FPT FY2023 & FY2024)",
+            label="Trạng thái Cơ sở dữ liệu hiện tại",
             value=format_db_status(),
             interactive=False,
         )
 
-        with gr.Accordion("1. Nạp thêm Báo cáo tài chính PDF từ máy tính (.pdf)", open=True):
+        with gr.Accordion("1. Nạp Báo cáo tài chính PDF từ máy tính (.pdf)", open=True):
             with gr.Row():
                 pdf_input = gr.File(
                     label="Chọn 1 hoặc nhiều file PDF BCTC (.pdf)",
@@ -2505,42 +2658,41 @@ def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
                 )
                 with gr.Column():
                     upload_company = gr.Textbox(
-                        label="Mã Doanh nghiệp cho file tải lên (Để trống sẽ tự nhận diện từ tên file / nội dung PDF)",
-                        placeholder="Để trống để tự động nhận diện (hoặc nhập FPT, VNM, HPG...)",
+                        label="Mã Doanh nghiệp của file tải lên (Để trống hệ thống sẽ tự nhận diện từ nội dung PDF / tên file)",
+                        placeholder="Ví dụ: VNM, HPG, VCB... (Để trống để tự động nhận diện)",
                         value="",
                     )
                     upload_period = gr.Textbox(
-                        label="Kỳ Báo cáo cho file tải lên (Để trống sẽ tự nhận diện từ tên file / nội dung PDF)",
-                        placeholder="Để trống để tự động nhận diện (hoặc nhập FY2024, Q4_2024...)",
+                        label="Kỳ Báo cáo của file tải lên (Để trống hệ thống sẽ tự nhận diện)",
+                        placeholder="Ví dụ: FY2024, Q4_2024... (Để trống để tự động nhận diện)",
                         value="",
                     )
-                    ingest_btn = gr.Button("📥 Nạp & Kiểm toán File PDF vào Hệ thống", variant="secondary")
-            ingest_log_out = gr.Textbox(label="Kết quả bóc tách & Kiểm toán đầu vào (VAS Quality Gate)", lines=2)
+                    clear_before_upload = gr.Checkbox(
+                        label="Xóa dữ liệu cũ / dữ liệu mẫu FPT trước khi nạp file mới này",
+                        value=True,
+                    )
+                    with gr.Row():
+                        ingest_btn = gr.Button("📥 Nạp & Kiểm toán File PDF vào Hệ thống", variant="primary")
+                        clear_btn = gr.Button("🗑️ Xóa sạch DB hiện tại", variant="stop")
+                        seed_btn = gr.Button("🧪 Nạp dữ liệu mẫu FPT", variant="secondary")
+            ingest_log_out = gr.Textbox(label="Nhật ký bóc tách & Kiểm toán đầu vào (VAS Quality Gate)", lines=2)
 
         gr.Markdown("### 2. Truy vấn, Tính toán Tất định & Kiểm chứng Số liệu")
         with gr.Row():
-            company_in = gr.Textbox(label="Mã Doanh nghiệp", value="FPT")
-            period_in = gr.Textbox(label="Kỳ Báo cáo", value="FY2024")
+            company_in = gr.Textbox(
+                label="Mã Doanh nghiệp cần hỏi (Tự động cập nhật theo file bạn vừa nạp)",
+                value=default_comp,
+                placeholder="Nhập mã công ty vừa nạp (hoặc để trống sẽ tự lấy công ty trong DB)",
+            )
+            period_in = gr.Textbox(label="Kỳ Báo cáo", value=default_per)
             comp_period_in = gr.Textbox(label="Kỳ So sánh YoY (Tùy chọn)", value="FY2023")
 
         query_in = gr.Textbox(
             label="Câu hỏi phân tích tài chính",
-            value="Tổng cộng tài sản của FPT năm 2024 là bao nhiêu?",
-            placeholder="Ví dụ: Tổng cộng tài sản của FPT năm 2024 là bao nhiêu? Hoặc: Kiểm toán cân đối BCTC",
+            value=f"Tổng cộng tài sản của {default_comp or 'doanh nghiệp'} kỳ {default_per} là bao nhiêu?",
+            placeholder="Ví dụ: Tổng cộng tài sản năm 2024 là bao nhiêu? Hoặc: Kiểm toán cân đối BCTC",
         )
-        submit_btn = gr.Button("Phân tích & Kiểm chứng số liệu", variant="primary")
-
-        gr.Examples(
-            examples=[
-                ["Tổng cộng tài sản của FPT năm 2024 là bao nhiêu?", "FPT", "FY2024", "FY2023"],
-                ["Tăng trưởng doanh thu thuần của FPT năm 2024 so với 2023?", "FPT", "FY2024", "FY2023"],
-                ["Tính biên lợi nhuận gộp của FPT kỳ FY2024", "FPT", "FY2024", "FY2023"],
-                ["Tính ROE của FPT kỳ FY2024", "FPT", "FY2024", "FY2023"],
-                ["Kiểm toán đẳng thức kế toán BCTC FPT", "FPT", "FY2024", "FY2023"],
-            ],
-            inputs=[query_in, company_in, period_in, comp_period_in],
-            label="Câu hỏi mẫu (Bấm vào để thử ngay)",
-        )
+        submit_btn = gr.Button("🔍 Phân tích & Kiểm chứng số liệu", variant="primary")
 
         answer_out = gr.Textbox(label="Câu trả lời (Đã kiểm chứng tất định)", lines=5)
         with gr.Row():
@@ -2549,8 +2701,18 @@ def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
 
         ingest_btn.click(
             fn=handle_pdf_upload,
-            inputs=[pdf_input, upload_company, upload_period, company_in, period_in],
+            inputs=[pdf_input, upload_company, upload_period, clear_before_upload, company_in, period_in, query_in],
+            outputs=[ingest_log_out, db_status_box, company_in, period_in, query_in],
+        )
+        clear_btn.click(
+            fn=handle_clear_db,
+            inputs=[],
             outputs=[ingest_log_out, db_status_box, company_in, period_in],
+        )
+        seed_btn.click(
+            fn=handle_seed_fpt,
+            inputs=[],
+            outputs=[ingest_log_out, db_status_box, company_in, period_in, query_in],
         )
         submit_btn.click(
             fn=handle_qa,

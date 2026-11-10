@@ -304,6 +304,37 @@ def test_upgrade6_wireless_plain_text_table_with_and_without_vas_code():
     assert rows[1][3] == "72.000"
 
 
+
+
+def test_upgrade7_no_false_fpt_tagging_on_arbitrary_filenames():
+    """
+    Kiểm tra khắc phục triệt để lỗi mọi tài liệu nạp vào đều bị gắn nhãn FPT:
+    1. Tên file có mã ở cuối (`Bao_cao_tai_chinh_Hop_nhat_2024_HPG.pdf`) -> phải nhận diện là `HPG`.
+    2. Tên file không có mã ở đầu nhưng nội dung PDF ghi `CÔNG TY CỔ PHẦN SỮA VIỆT NAM` -> phải nhận diện là `VNM`.
+    3. Tên file của một công ty bất kỳ ngoài danh sách (`BCTC_2024_Tap_doan_Hoa_Sen.pdf`) -> phải lấy tên từ file/nội dung,
+       TUYỆT ĐỐI KHÔNG ĐƯỢC gán thành `FPT`.
+    """
+    pipeline = UnifiedFinancialRAGPipeline(seed_sample_data_if_empty=False)
+
+    c1, p1 = pipeline.infer_company_and_period("Bao_cao_tai_chinh_Hop_nhat_2024_HPG.pdf")
+    assert c1 == "HPG"
+    assert p1 == "FY2024"
+
+    c2, p2 = pipeline.infer_company_and_period(
+        "BCTC_Hop_nhat_Q4_2024.pdf",
+        first_pages_text="CÔNG TY CỔ PHẦN SỮA VIỆT NAM (VINAMILK) - BÁO CÁO TÀI CHÍNH HỢP NHẤT QUÝ 4 NĂM 2024",
+    )
+    assert c2 == "VNM"
+    assert p2 == "Q4_2024"
+
+    c3, p3 = pipeline.infer_company_and_period(
+        "20240330_BCTC_2023.pdf",
+        first_pages_text="CÔNG TY CỔ PHẦN TẬP ĐOÀN HOA SEN - BÁO CÁO TÀI CHÍNH HỢP NHẤT NĂM 2023",
+    )
+    assert c3 != "FPT"
+    assert "TAP_DOAN_HOA" in c3 or "HOA_SEN" in c3
+
+
 class TestUnifiedFinancialPipelineSuite(unittest.TestCase):
     def test_01_mislabeled_pdf(self):
         test_bug1_detect_mislabeled_nvda_analog_devices_pdf()
@@ -340,6 +371,9 @@ class TestUnifiedFinancialPipelineSuite(unittest.TestCase):
 
     def test_12_wireless_plain_text_table_with_and_without_vas_code(self):
         test_upgrade6_wireless_plain_text_table_with_and_without_vas_code()
+
+    def test_13_no_false_fpt_tagging_on_arbitrary_filenames(self):
+        test_upgrade7_no_false_fpt_tagging_on_arbitrary_filenames()
 
 
 if __name__ == "__main__":
