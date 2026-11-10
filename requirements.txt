@@ -1,0 +1,16 @@
+# Unified Financial Multimodal RAG - Google Colab T4 Requirements
+torch>=2.2.0
+torchvision>=0.17.0
+transformers>=4.49.0
+accelerate>=0.30.0
+autoawq>=0.2.6
+qwen-vl-utils>=0.0.8
+sentence-transformers>=3.0.0
+FlagEmbedding>=1.2.10
+faiss-cpu>=1.8.0
+docling>=2.15.0
+pdfplumber>=0.11.0
+gradio>=4.44.0
+fastapi>=0.115.0
+uvicorn>=0.30.0
+pytest>=8.0.0
