@@ -1614,13 +1614,14 @@ class NumericalVerifier:
 
 
 # ==============================================================================
-# 10. END-TO-END UNIFIED PIPELINE & ROUTER (Vá lỗi #3 từ `REVIEW_20261020.md`)
+# 10. END-TO-END UNIFIED PIPELINE & REAL PDF FILE INGESTOR (Đã bổ sung đọc file .PDF thực tế)
 # ==============================================================================
 
 class UnifiedFinancialRAGPipeline:
     """
     Pipeline hợp nhất hoàn chỉnh nối khép kín:
-    `SmartFinancialPDFParser` -> `VASAccountingQualityGate` -> `UnifiedSQLiteStore`
+    `RealPDFFileReader` (`pdfplumber` / `pypdfium2` / `pypdf` + `Qwen2.5-VL` OCR cho trang scan)
+    -> `SmartFinancialPDFParser` -> `VASAccountingQualityGate` -> `UnifiedSQLiteStore`
     -> `QueryRouter` -> (`DeterministicFinancialCalculator` + `HybridFinancialRetriever`)
     -> `SharedQwenVLBackbone` -> `NumericalVerifier`.
     """
@@ -1629,6 +1630,7 @@ class UnifiedFinancialRAGPipeline:
         self,
         db_path: Union[str, Path] = ":memory:",
         vlm_backbone: Optional[SharedQwenVLBackbone] = None,
+        seed_sample_data_if_empty: bool = False,
     ) -> None:
         self.registry = VASMetricRegistry()
         self.fact_extractor = FactExtractor(self.registry)
@@ -1640,9 +1642,316 @@ class UnifiedFinancialRAGPipeline:
             quality_gate=self.quality_gate,
         )
         self.store = UnifiedSQLiteStore(db_path=db_path)
+        self.ocr_cache = PageOCRCacheManager(self.store.conn)
         self.retriever = HybridFinancialRetriever(store=self.store)
         self.calculator = DeterministicFinancialCalculator()
         self.verifier = NumericalVerifier()
+
+        if seed_sample_data_if_empty and self.get_database_summary()["total_facts"] == 0:
+            self.seed_default_fpt_data()
+
+    def get_database_summary(self) -> Dict[str, Any]:
+        """Trả về thống kê các báo cáo đã nạp trong SQLite để hiển thị trên giao diện Gradio."""
+        cur = self.store.conn.cursor()
+        fact_count = cur.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+        chunk_count = cur.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        rows = cur.execute(
+            """
+            SELECT company, period, COUNT(*) as num_facts
+            FROM facts
+            GROUP BY company, period
+            ORDER BY company ASC, period DESC
+            """
+        ).fetchall()
+        reports = [dict(r) for r in rows]
+        return {
+            "total_facts": int(fact_count),
+            "total_chunks": int(chunk_count),
+            "loaded_reports": reports,
+        }
+
+    def seed_default_fpt_data(self) -> None:
+        """
+        Nạp sẵn dữ liệu BCTC Hợp nhất mẫu của FPT (FY2023 và FY2024) khi khởi tạo DB rỗng,
+        giúp người dùng vừa mở Gradio lên là có thể đặt câu hỏi kiểm thử ngay lập tức.
+        """
+        fpt_2023_pages = [
+            {
+                "page": 1,
+                "text": (
+                    "CÔNG TY CỔ PHẦN FPT - BÁO CÁO TÀI CHÍNH HỢP NHẤT NĂM 2023 (FY2023).\n"
+                    "Bảng cân đối kế toán hợp nhất tại ngày 31/12/2023. Đơn vị tính: Tỷ đồng."
+                ),
+                "tables": [
+                    [
+                        ["Tài sản ngắn hạn", "100", "V.01", "36.705", "30.938"],
+                        ["Tiền và các khoản tương đương tiền", "110", "V.02", "8.279", "6.440"],
+                        ["Các khoản phải thu ngắn hạn", "130", "V.03", "9.674", "8.120"],
+                        ["Hàng tồn kho", "140", "V.04", "1.593", "1.965"],
+                        ["Tài sản dài hạn", "200", "V.08", "23.578", "20.712"],
+                        ["Tổng cộng tài sản", "270", "", "60.283", "51.650"],
+                        ["Nợ phải trả", "300", "V.12", "30.350", "26.294"],
+                        ["Nợ ngắn hạn", "310", "V.13", "29.752", "25.100"],
+                        ["Nợ dài hạn", "330", "V.14", "598", "1.194"],
+                        ["Vốn chủ sở hữu", "400", "V.18", "29.933", "25.356"],
+                        ["Tổng cộng nguồn vốn", "440", "", "60.283", "51.650"],
+                    ]
+                ],
+            },
+            {
+                "page": 2,
+                "text": (
+                    "CÔNG TY CỔ PHẦN FPT - Báo cáo kết quả hoạt động kinh doanh hợp nhất năm 2023 (FY2023).\n"
+                    "Đơn vị tính: Tỷ đồng."
+                ),
+                "tables": [
+                    [
+                        ["Doanh thu thuần về bán hàng và cung cấp dịch vụ", "10", "VI.1", "52.618", "44.010"],
+                        ["Giá vốn hàng bán", "11", "VI.2", "32.333", "26.826"],
+                        ["Lợi nhuận gộp về bán hàng và cung cấp dịch vụ", "20", "", "20.285", "17.184"],
+                        ["Tổng lợi nhuận kế toán trước thuế", "50", "", "9.203", "7.662"],
+                        ["Chi phí thuế TNDN hiện hành", "51", "VI.8", "1.415", "1.171"],
+                        ["Chi phí thuế TNDN hoãn lại", "52", "VI.8", "0", "0"],
+                        ["Lợi nhuận sau thuế thu nhập doanh nghiệp", "60", "", "7.788", "6.491"],
+                    ]
+                ],
+            },
+        ]
+
+        fpt_2024_pages = [
+            {
+                "page": 1,
+                "text": (
+                    "CÔNG TY CỔ PHẦN FPT - BÁO CÁO TÀI CHÍNH HỢP NHẤT NĂM 2024 (FY2024).\n"
+                    "Bảng cân đối kế toán hợp nhất tại ngày 31/12/2024. Đơn vị tính: Tỷ đồng."
+                ),
+                "tables": [
+                    [
+                        ["Tài sản ngắn hạn", "100", "V.01", "45.610", "36.705"],
+                        ["Tiền và các khoản tương đương tiền", "110", "V.02", "9.315", "8.279"],
+                        ["Các khoản phải thu ngắn hạn", "130", "V.03", "11.240", "9.674"],
+                        ["Hàng tồn kho", "140", "V.04", "1.845", "1.593"],
+                        ["Tài sản dài hạn", "200", "V.08", "26.390", "23.578"],
+                        ["Tổng cộng tài sản", "270", "", "72.000", "60.283"],
+                        ["Nợ phải trả", "300", "V.12", "36.400", "30.350"],
+                        ["Nợ ngắn hạn", "310", "V.13", "35.120", "29.752"],
+                        ["Nợ dài hạn", "330", "V.14", "1.280", "598"],
+                        ["Vốn chủ sở hữu", "400", "V.18", "35.600", "29.933"],
+                        ["Tổng cộng nguồn vốn", "440", "", "72.000", "60.283"],
+                    ]
+                ],
+            },
+            {
+                "page": 2,
+                "text": (
+                    "CÔNG TY CỔ PHẦN FPT - Báo cáo kết quả hoạt động kinh doanh hợp nhất năm 2024 (FY2024).\n"
+                    "Đơn vị tính: Tỷ đồng."
+                ),
+                "tables": [
+                    [
+                        ["Doanh thu thuần về bán hàng và cung cấp dịch vụ", "10", "VI.1", "62.849", "52.618"],
+                        ["Giá vốn hàng bán", "11", "VI.2", "38.249", "32.333"],
+                        ["Lợi nhuận gộp về bán hàng và cung cấp dịch vụ", "20", "", "24.600", "20.285"],
+                        ["Tổng lợi nhuận kế toán trước thuế", "50", "", "11.070", "9.203"],
+                        ["Chi phí thuế TNDN hiện hành", "51", "VI.8", "1.643", "1.415"],
+                        ["Chi phí thuế TNDN hoãn lại", "52", "VI.8", "0", "0"],
+                        ["Lợi nhuận sau thuế thu nhập doanh nghiệp", "60", "", "9.427", "7.788"],
+                    ]
+                ],
+            },
+            {
+                "page": 3,
+                "text": (
+                    "CÔNG TY CỔ PHẦN FPT - Báo cáo lưu chuyển tiền tệ hợp nhất năm 2024 (FY2024).\n"
+                    "Thuyết minh: Doanh thu khối Công nghệ thông tin nước ngoài tăng trưởng 27,4% nhờ thị trường Nhật Bản và APAC."
+                ),
+                "tables": [
+                    [
+                        ["Lưu chuyển tiền thuần từ hoạt động kinh doanh", "20", "", "12.450", "9.820"],
+                        ["Lưu chuyển tiền thuần từ hoạt động đầu tư", "30", "", "(6.814)", "(5.120)"],
+                        ["Lưu chuyển tiền thuần từ hoạt động tài chính", "40", "", "(4.600)", "(2.861)"],
+                        ["Lưu chuyển tiền thuần trong kỳ", "50", "", "1.036", "1.839"],
+                        ["Tiền và tương đương tiền đầu kỳ", "60", "", "8.279", "6.440"],
+                        ["Ảnh hưởng của thay đổi tỷ giá hối đoái quy đổi ngoại tệ", "61", "", "0", "0"],
+                        ["Tiền và tương đương tiền cuối kỳ", "70", "", "9.315", "8.279"],
+                    ]
+                ],
+            },
+        ]
+        self.ingest_pages(fpt_2023_pages, company="FPT", period="FY2023", strict_identity_check=False)
+        self.ingest_pages(fpt_2024_pages, company="FPT", period="FY2024", strict_identity_check=False)
+
+    @staticmethod
+    def infer_company_and_period_from_filename(
+        file_path: Union[str, Path],
+        default_company: str = "FPT",
+        default_period: str = "FY2024",
+    ) -> Tuple[str, str]:
+        stem = Path(file_path).stem.upper()
+        comp_match = re.match(r"^([A-Z]{3,5})[_\-\s]", stem)
+        company = comp_match.group(1) if comp_match else default_company.upper()
+
+        q_match = re.search(r"(Q[1-4][_\-\s]*20\d{2}|20\d{2}[_\-\s]*Q[1-4])", stem)
+        y_match = re.search(r"(20\d{2})", stem)
+        if q_match:
+            period = re.sub(r"[\s_\-]+", "_", q_match.group(1))
+        elif y_match:
+            period = f"FY{y_match.group(1)}"
+        else:
+            period = default_period
+        return company, period
+
+    def read_pdf_file_to_pages_data(
+        self,
+        pdf_path: Union[str, Path],
+        max_pages: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Đọc file `.pdf` vật lý từ đĩa hoặc từ Gradio File Upload:
+        1. Thử đọc text và bảng bằng `pdfplumber` (chuẩn nhất cho PDF có text layer).
+        2. Fallback sang `pypdf` hoặc `pypdfium2` nếu môi trường thiếu `pdfplumber`.
+        3. Với các trang scan (`len(text.strip()) < 40` và không có bảng), tự động render
+           trang PDF thành ảnh `PIL.Image` (200 DPI) qua `pypdfium2` để đưa vào `Qwen2.5-VL`.
+        """
+        path_obj = Path(pdf_path)
+        if not path_obj.exists():
+            raise FileNotFoundError(f"Không tìm thấy file PDF tại đường dẫn: {path_obj}")
+
+        pages_data: List[Dict[str, Any]] = []
+
+        pdfium_doc = None
+        try:
+            import pypdfium2 as pdfium
+            pdfium_doc = pdfium.PdfDocument(str(path_obj))
+        except Exception:
+            pdfium_doc = None
+
+        try:
+            import pdfplumber
+
+            with pdfplumber.open(str(path_obj)) as pdf:
+                total_p = len(pdf.pages)
+                limit = min(total_p, max_pages) if max_pages else total_p
+                for idx in range(limit):
+                    p = pdf.pages[idx]
+                    txt = (p.extract_text() or "").strip()
+                    raw_tables = p.extract_tables() or []
+                    cleaned_tables = []
+                    for tbl in raw_tables:
+                        if not tbl:
+                            continue
+                        cleaned_rows = [
+                            [str(cell).strip() if cell is not None else "" for cell in row]
+                            for row in tbl
+                            if row and any(c is not None and str(c).strip() for c in row)
+                        ]
+                        if cleaned_rows:
+                            cleaned_tables.append(cleaned_rows)
+
+                    if not cleaned_tables and txt:
+                        heuristic_rows = self._extract_vas_rows_from_plain_text(txt)
+                        if heuristic_rows:
+                            cleaned_tables.append(heuristic_rows)
+
+                    page_image = None
+                    if len(txt) < 40 and not cleaned_tables and pdfium_doc is not None and idx < len(pdfium_doc):
+                        try:
+                            bitmap = pdfium_doc[idx].render(scale=2.0)
+                            page_image = bitmap.to_pil()
+                        except Exception:
+                            page_image = None
+
+                    pages_data.append(
+                        {
+                            "page": idx + 1,
+                            "text": txt,
+                            "tables": cleaned_tables,
+                            "image": page_image,
+                        }
+                    )
+            return pages_data
+        except ImportError:
+            pass
+
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(path_obj))
+        total_p = len(reader.pages)
+        limit = min(total_p, max_pages) if max_pages else total_p
+        for idx in range(limit):
+            txt = (reader.pages[idx].extract_text() or "").strip()
+            heuristic_rows = self._extract_vas_rows_from_plain_text(txt) if txt else []
+            cleaned_tables = [heuristic_rows] if heuristic_rows else []
+
+            page_image = None
+            if len(txt) < 40 and not cleaned_tables and pdfium_doc is not None and idx < len(pdfium_doc):
+                try:
+                    bitmap = pdfium_doc[idx].render(scale=2.0)
+                    page_image = bitmap.to_pil()
+                except Exception:
+                    page_image = None
+
+            pages_data.append(
+                {
+                    "page": idx + 1,
+                    "text": txt,
+                    "tables": cleaned_tables,
+                    "image": page_image,
+                }
+            )
+        return pages_data
+
+    @staticmethod
+    def _extract_vas_rows_from_plain_text(page_text: str) -> List[List[str]]:
+        rows: List[List[str]] = []
+        pattern = re.compile(
+            r"^(?P<label>[^\d\n][^\n]{3,95}?)\s+(?P<code>\d{2,3})\s+"
+            r"(?:(?P<note>[IVX]+\.\d+|TM\.?\d+|\d{1,2}\.\d{1,2})\s+)?"
+            r"(?P<curr>\(?-?\d[\d.,]*\)?)"
+            r"(?:\s+(?P<prev>\(?-?\d[\d.,]*\)?))?\s*$",
+            re.IGNORECASE,
+        )
+        for raw_line in page_text.splitlines():
+            line = re.sub(r"^\s*(?:[IVX]+|[A-Z]|\d+)\.\s*", "", raw_line.strip())
+            m = pattern.match(line)
+            if m:
+                rows.append(
+                    [
+                        m.group("label").strip(),
+                        m.group("code").strip(),
+                        (m.group("note") or "").strip(),
+                        m.group("curr").strip(),
+                        (m.group("prev") or "").strip(),
+                    ]
+                )
+        return rows
+
+    def ingest_pdf_file(
+        self,
+        pdf_path: Union[str, Path],
+        company: Optional[str] = None,
+        period: Optional[str] = None,
+        strict_identity_check: bool = False,
+        max_pages: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Nạp trực tiếp một file `.pdf` vào hệ thống:
+        Đọc trang -> Bóc bảng & chữ (kèm VLM OCR cho trang scan) -> Kiểm toán VAS -> Lưu SQLite & Index.
+        """
+        inferred_comp, inferred_period = self.infer_company_and_period_from_filename(pdf_path)
+        comp = (company or "").strip().upper() or inferred_comp
+        per = (period or "").strip() or inferred_period
+
+        pages_data = self.read_pdf_file_to_pages_data(pdf_path, max_pages=max_pages)
+        result = self.ingest_pages(
+            pages_data=pages_data,
+            company=comp,
+            period=per,
+            strict_identity_check=strict_identity_check,
+        )
+        result["file_name"] = Path(pdf_path).name
+        result["pages_read"] = len(pages_data)
+        return result
 
     def ingest_pages(
         self,
@@ -1683,15 +1992,25 @@ class UnifiedFinancialRAGPipeline:
         period: str,
         comparison_period: Optional[str] = None,
     ) -> Dict[str, Any]:
-        intent = self.classify_intent(query)
-        comp = company.upper()
+        q_clean = (query or "").strip()
+        if not q_clean:
+            return {
+                "intent": "empty_query",
+                "answer": "Vui lòng nhập câu hỏi phân tích tài chính (ví dụ: 'Tổng cộng tài sản của FPT năm 2024 là bao nhiêu?').",
+                "execution_path": "validation",
+                "verification": {"is_verified": True, "confidence": 1.0},
+            }
+
+        intent = self.classify_intent(q_clean)
+        comp = (company or "FPT").strip().upper()
+        per = (period or "FY2024").strip()
 
         if intent == "reconciliation":
-            q_report = self.store.get_quality_report(comp, period)
+            q_report = self.store.get_quality_report(comp, per)
             if not q_report:
                 return {
                     "intent": intent,
-                    "answer": f"Chưa có dữ liệu kiểm toán BCTC cho {comp} kỳ {period}.",
+                    "answer": f"Chưa có dữ liệu kiểm toán BCTC cho {comp} kỳ {per}. Bạn hãy tải file PDF lên ở mục 'Nạp Báo cáo tài chính PDF' phía trên.",
                     "execution_path": "deterministic_reconciliation",
                     "verification": {"is_verified": True, "confidence": 1.0},
                 }
@@ -1704,7 +2023,7 @@ class UnifiedFinancialRAGPipeline:
                 if c["status"] != "skipped"
             ]
             answer_text = (
-                f"Báo cáo kiểm tra chéo đẳng thức kế toán VAS của {comp} ({period}): {status_vi} "
+                f"Báo cáo kiểm tra chéo đẳng thức kế toán VAS của {comp} ({per}): {status_vi} "
                 f"({passed}/{total} quy tắc kiểm tra).\n" + "\n".join(details)
             )
             return {
@@ -1716,19 +2035,19 @@ class UnifiedFinancialRAGPipeline:
             }
 
         if intent == "ratio":
-            return self._handle_ratio_query(query=query, company=comp, period=period)
+            return self._handle_ratio_query(query=q_clean, company=comp, period=per)
 
         if intent == "yoy_comparison" and comparison_period:
-            spec = self.registry.match(query)
+            spec = self.registry.match(q_clean)
             if spec:
-                curr_fact = self.store.query_fact(comp, spec.metric_code, period, allow_period_fallback=False)
+                curr_fact = self.store.query_fact(comp, spec.metric_code, per, allow_period_fallback=False)
                 prev_fact = self.store.query_fact(comp, spec.metric_code, comparison_period, allow_period_fallback=False)
                 if curr_fact and prev_fact:
                     yoy = self.calculator.compute_yoy_growth(curr_fact["value"], prev_fact["value"])
                     pct_str = f"{yoy['pct_change']:+.2f}%" if yoy["pct_change"] is not None else "N/A"
                     answer_text = (
                         f"{spec.canonical_name_vi} (Mã {spec.vas_code.replace('_CF', '')}) của {comp} "
-                        f"kỳ {period} đạt {curr_fact['value']:,.0f} {curr_fact['unit']} (trang {curr_fact['page']}), "
+                        f"kỳ {per} đạt {curr_fact['value']:,.0f} {curr_fact['unit']} (trang {curr_fact['page']}), "
                         f"so với mức {prev_fact['value']:,.0f} {prev_fact['unit']} của kỳ {comparison_period} "
                         f"(thay đổi tuyệt đối {float(yoy['absolute_change']):+,.0f} {curr_fact['unit']}, tương ứng {pct_str})."
                     )
@@ -1745,24 +2064,24 @@ class UnifiedFinancialRAGPipeline:
                         "execution_path": "deterministic_calculator",
                         "calculation": yoy,
                         "citations": [
-                            {"period": period, "page": curr_fact["page"], "bbox": curr_fact.get("bbox_json")},
+                            {"period": per, "page": curr_fact["page"], "bbox": curr_fact.get("bbox_json")},
                             {"period": comparison_period, "page": prev_fact["page"], "bbox": prev_fact.get("bbox_json")},
                         ],
                         "verification": verification,
                     }
 
-        spec = self.registry.match(query)
+        spec = self.registry.match(q_clean)
         fact_record = (
-            self.store.query_fact(comp, spec.metric_code, period, allow_period_fallback=True)
+            self.store.query_fact(comp, spec.metric_code, per, allow_period_fallback=True)
             if spec
             else None
         )
-        retrieved_chunks = self.retriever.search(query=query, company=comp, period=period, top_k=4)
+        retrieved_chunks = self.retriever.search(query=q_clean, company=comp, period=per, top_k=4)
 
         if fact_record:
             actual_period = fact_record["actual_period"]
             fallback_notice = (
-                f" (Lưu ý: Không tìm thấy dữ liệu kỳ {period}, hệ thống trả về kỳ gần nhất hiện có là {actual_period})"
+                f" (Lưu ý: Không tìm thấy dữ liệu kỳ {per}, hệ thống trả về kỳ gần nhất hiện có là {actual_period})"
                 if fact_record.get("is_fallback_period")
                 else ""
             )
@@ -1785,23 +2104,33 @@ class UnifiedFinancialRAGPipeline:
         context_text = "\n\n".join(
             f"[Trang {c['page']}] {c['content']}" for c in retrieved_chunks
         )
-        all_period_facts = self.store.list_facts_for_period(comp, period)
+        all_period_facts = self.store.list_facts_for_period(comp, per)
         ref_numbers = [f["value"] for f in all_period_facts]
         for c in retrieved_chunks:
             ref_numbers.extend(self.verifier.extract_numbers(c["content"]))
+
+        if not context_text and all_period_facts:
+            top_facts_summary = "; ".join(
+                f"{f['metric_name']} (Mã {f['vas_code'] or 'N/A'}): {f['value']:,.0f} {f['unit']}"
+                for f in all_period_facts[:8]
+            )
+            context_text = f"Các chỉ tiêu tài chính chính của {comp} kỳ {per}: {top_facts_summary}."
 
         llm_answer = self.vlm_backbone.generate_text(
             system_prompt=(
                 "Bạn là chuyên gia phân tích Báo cáo tài chính. Chỉ sử dụng đúng số liệu trong ngữ cảnh được cung cấp, "
                 "nêu rõ kỳ báo cáo và số trang trích dẫn."
             ),
-            user_prompt=f"Câu hỏi: {query}\nCông ty: {comp}, Kỳ: {period}\nNgữ cảnh:\n{context_text}",
+            user_prompt=f"Câu hỏi: {q_clean}\nCông ty: {comp}, Kỳ: {per}\nNgữ cảnh:\n{context_text}",
         )
         if not llm_answer:
             llm_answer = (
-                f"Dựa trên thuyết minh BCTC {comp} kỳ {period}: {context_text[:500]}"
+                f"Dựa trên BCTC {comp} kỳ {per}:\n{context_text[:800]}"
                 if context_text
-                else f"Không tìm thấy thông tin phù hợp cho câu hỏi tại {comp} kỳ {period}."
+                else (
+                    f"Hiện chưa có dữ liệu của doanh nghiệp '{comp}' kỳ '{per}' trong cơ sở dữ liệu. "
+                    f"Bạn hãy tải file PDF BCTC lên ở khung '1. Nạp Báo cáo tài chính PDF' phía trên rồi bấm phân tích."
+                )
             )
 
         verification = self.verifier.verify(llm_answer, ref_numbers)
@@ -1861,15 +2190,65 @@ class UnifiedFinancialRAGPipeline:
 
 
 # ==============================================================================
-# 11. GRADIO UI INTEGRATION FOR GOOGLE COLAB T4
+# 11. GRADIO UI INTEGRATION FOR GOOGLE COLAB T4 (Có khung Upload PDF + Dữ liệu mẫu sẵn)
 # ==============================================================================
 
 def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
     """
-    Khởi tạo giao diện Gradio kết nối trực tiếp vào `UnifiedFinancialRAGPipeline`
-    (Thay thế bản demo rời rạc trước đây trong `src/ui/gradio_app.py`).
+    Giao diện Gradio đầy đủ gồm 2 phần:
+    1. Tải trực tiếp file PDF Báo cáo tài chính (.pdf) lên hệ thống + Xem trạng thái dữ liệu đã nạp.
+    2. Đặt câu hỏi phân tích tài chính, tính tỷ số YoY/ROE/ROA và kiểm toán cân đối BCTC.
+    Nếu cơ sở dữ liệu đang trống khi mở Gradio, tự động nạp sẵn bộ dữ liệu mẫu FPT (FY2023 & FY2024).
     """
     import gradio as gr
+
+    if pipeline.get_database_summary()["total_facts"] == 0:
+        pipeline.seed_default_fpt_data()
+
+    def format_db_status() -> str:
+        summary = pipeline.get_database_summary()
+        if not summary["loaded_reports"]:
+            return "Chưa có báo cáo nào trong DB. Hãy tải file PDF lên ở mục 1 bên dưới."
+        items = [
+            f"{r['company']} ({r['period']}): {r['num_facts']} chỉ tiêu"
+            for r in summary["loaded_reports"]
+        ]
+        return (
+            f"Đã nạp sẵn {summary['total_facts']} chỉ tiêu tài chính & {summary['total_chunks']} đoạn/bảng "
+            f"từ: " + " | ".join(items)
+        )
+
+    def handle_pdf_upload(
+        uploaded_files: Any,
+        company_override: str,
+        period_override: str,
+    ) -> Tuple[str, str]:
+        if not uploaded_files:
+            return "Vui lòng chọn ít nhất 1 file PDF Báo cáo tài chính để nạp.", format_db_status()
+
+        file_list = uploaded_files if isinstance(uploaded_files, list) else [uploaded_files]
+        logs: List[str] = []
+
+        for f_obj in file_list:
+            f_path = f_obj.name if hasattr(f_obj, "name") else str(f_obj)
+            try:
+                res = pipeline.ingest_pdf_file(
+                    pdf_path=f_path,
+                    company=company_override.strip() or None,
+                    period=period_override.strip() or None,
+                    strict_identity_check=False,
+                )
+                q_rep = res["quality_report"]
+                logs.append(
+                    f"[THÀNH CÔNG] File '{res['file_name']}' -> Công ty: {res['company']} | Kỳ: {res['period']} | "
+                    f"Số trang đọc: {res['pages_read']} | Chỉ tiêu bóc tách: {len(res['facts'])} | "
+                    f"Segments/Bảng: {len(res['chunks'])} | Kiểm toán VAS: {q_rep.overall_status.upper()} "
+                    f"({q_rep.passed_checks}/{q_rep.total_checks} quy tắc)"
+                )
+            except Exception as exc:
+                logs.append(f"[LỖI] Không thể nạp file '{Path(f_path).name}': {exc}")
+
+        return "\n".join(logs), format_db_status()
 
     def handle_qa(query: str, company: str, period: str, comparison_period: str) -> Tuple[str, str, str]:
         comp_period = comparison_period.strip() or None
@@ -1894,27 +2273,75 @@ def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
 
     with gr.Blocks(title="Unified Financial Multimodal RAG (Colab T4)") as demo:
         gr.Markdown("## Hệ thống Financial Multimodal RAG Hợp nhất (Qwen2.5-VL + BGE-M3 + VAS Audit Gate)")
+
+        db_status_box = gr.Textbox(
+            label="Trạng thái Cơ sở dữ liệu hiện tại (Đã nạp sẵn dữ liệu FPT FY2023 & FY2024)",
+            value=format_db_status(),
+            interactive=False,
+        )
+
+        with gr.Accordion("1. Nạp thêm Báo cáo tài chính PDF từ máy tính (.pdf)", open=True):
+            with gr.Row():
+                pdf_input = gr.File(
+                    label="Chọn 1 hoặc nhiều file PDF BCTC (.pdf)",
+                    file_types=[".pdf"],
+                    file_count="multiple",
+                )
+                with gr.Column():
+                    upload_company = gr.Textbox(
+                        label="Mã Doanh nghiệp cho file tải lên (Để trống sẽ tự nhận diện từ tên file)",
+                        placeholder="Ví dụ: FPT, VNM, HPG...",
+                        value="FPT",
+                    )
+                    upload_period = gr.Textbox(
+                        label="Kỳ Báo cáo cho file tải lên (Để trống sẽ tự nhận diện từ tên file)",
+                        placeholder="Ví dụ: FY2024, Q4_2024...",
+                        value="FY2024",
+                    )
+                    ingest_btn = gr.Button("📥 Nạp & Kiểm toán File PDF vào Hệ thống", variant="secondary")
+            ingest_log_out = gr.Textbox(label="Kết quả bóc tách & Kiểm toán đầu vào (VAS Quality Gate)", lines=2)
+
+        gr.Markdown("### 2. Truy vấn, Tính toán Tất định & Kiểm chứng Số liệu")
         with gr.Row():
             company_in = gr.Textbox(label="Mã Doanh nghiệp", value="FPT")
             period_in = gr.Textbox(label="Kỳ Báo cáo", value="FY2024")
             comp_period_in = gr.Textbox(label="Kỳ So sánh YoY (Tùy chọn)", value="FY2023")
+
         query_in = gr.Textbox(
             label="Câu hỏi phân tích tài chính",
+            value="Tổng cộng tài sản của FPT năm 2024 là bao nhiêu?",
             placeholder="Ví dụ: Tổng cộng tài sản của FPT năm 2024 là bao nhiêu? Hoặc: Kiểm toán cân đối BCTC",
         )
         submit_btn = gr.Button("Phân tích & Kiểm chứng số liệu", variant="primary")
+
+        gr.Examples(
+            examples=[
+                ["Tổng cộng tài sản của FPT năm 2024 là bao nhiêu?", "FPT", "FY2024", "FY2023"],
+                ["Tăng trưởng doanh thu thuần của FPT năm 2024 so với 2023?", "FPT", "FY2024", "FY2023"],
+                ["Tính biên lợi nhuận gộp của FPT kỳ FY2024", "FPT", "FY2024", "FY2023"],
+                ["Tính ROE của FPT kỳ FY2024", "FPT", "FY2024", "FY2023"],
+                ["Kiểm toán đẳng thức kế toán BCTC FPT", "FPT", "FY2024", "FY2023"],
+            ],
+            inputs=[query_in, company_in, period_in, comp_period_in],
+            label="Câu hỏi mẫu (Bấm vào để thử ngay)",
+        )
+
         answer_out = gr.Textbox(label="Câu trả lời (Đã kiểm chứng tất định)", lines=5)
         with gr.Row():
             verifier_out = gr.Code(label="Kết quả Numerical Verifier", language="json")
             meta_out = gr.Code(label="Trace Đường thực thi & Tính toán", language="json")
 
+        ingest_btn.click(
+            fn=handle_pdf_upload,
+            inputs=[pdf_input, upload_company, upload_period],
+            outputs=[ingest_log_out, db_status_box],
+        )
         submit_btn.click(
             fn=handle_qa,
             inputs=[query_in, company_in, period_in, comp_period_in],
             outputs=[answer_out, verifier_out, meta_out],
         )
     return demo
-
 
 
 # ==============================================================================

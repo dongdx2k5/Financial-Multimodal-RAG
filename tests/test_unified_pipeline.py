@@ -274,6 +274,61 @@ def test_upgrade3_vlm_ocr_sqlite_cache():
     assert loaded == sample_rows
 
 
+
+
+def test_upgrade4_default_seed_and_real_pdf_file_ingestion():
+    """
+    Kiểm tra khắc phục lỗi không nạp được tài liệu trên Gradio:
+    1. Khi khởi tạo `UnifiedFinancialRAGPipeline()`, dữ liệu mẫu FPT FY2023 & FY2024 được nạp sẵn
+       để bấm nút hỏi ngay trên Gradio luôn trả về số liệu chuẩn xác.
+    2. Tạo một file `.pdf` thực tế trên đĩa và gọi `ingest_pdf_file()` để kiểm chứng luồng Upload PDF.
+    """
+    import tempfile
+    from pathlib import Path
+
+    pipeline = UnifiedFinancialRAGPipeline(seed_sample_data_if_empty=True)
+    summary = pipeline.get_database_summary()
+    assert summary["total_facts"] >= 15
+
+    # Hỏi ngay lập tức mà không cần nạp thủ công
+    immediate_ans = pipeline.answer_question(
+        "Tổng cộng tài sản của FPT năm 2024 là bao nhiêu?",
+        company="FPT",
+        period="FY2024",
+    )
+    assert "72,000" in immediate_ans["answer"]
+    assert immediate_ans["verification"]["is_verified"] is True
+
+    # Kiểm thử tạo file PDF vật lý và nạp qua `ingest_pdf_file`
+    from pypdf import PdfWriter
+    import io
+    try:
+        from reportlab.pdfgen import canvas
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf)
+        c.drawString(50, 780, "CONG TY CO PHAN SUA VIET NAM (VNM) - BAO CAO TAI CHINH HOP NHAT 2024")
+        c.drawString(50, 750, "Bang can doi ke toan hop nhat")
+        c.drawString(50, 720, "Tai san ngan han   100   V.01   35.000   31.000")
+        c.drawString(50, 700, "Tai san dai han    200   V.02   20.000   19.000")
+        c.drawString(50, 680, "Tong cong tai san  270          55.000   50.000")
+        c.save()
+        pdf_bytes = buf.getvalue()
+    except Exception:
+        writer = PdfWriter()
+        writer.add_blank_page(width=595, height=842)
+        buf = io.BytesIO()
+        writer.write(buf)
+        pdf_bytes = buf.getvalue()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pdf_path = Path(tmpdir) / "VNM_BCTC_2024.pdf"
+        pdf_path.write_bytes(pdf_bytes)
+        ingest_res = pipeline.ingest_pdf_file(pdf_path)
+        assert ingest_res["company"] == "VNM"
+        assert ingest_res["period"] == "FY2024"
+        assert ingest_res["pages_read"] == 1
+
+
 class TestUnifiedFinancialPipelineSuite(unittest.TestCase):
     def test_07_unit_scale_normalizer(self):
         test_upgrade1_unit_scale_normalizer()
@@ -283,6 +338,9 @@ class TestUnifiedFinancialPipelineSuite(unittest.TestCase):
 
     def test_09_vlm_ocr_sqlite_cache(self):
         test_upgrade3_vlm_ocr_sqlite_cache()
+
+    def test_10_default_seed_and_real_pdf_file_ingestion(self):
+        test_upgrade4_default_seed_and_real_pdf_file_ingestion()
 
     def test_01_mislabeled_pdf(self):
         test_bug1_detect_mislabeled_nvda_analog_devices_pdf()
