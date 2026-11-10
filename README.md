@@ -9,7 +9,7 @@ Thay vì sử dụng `pytesseract` dễ làm lệch dòng/cột trên Báo cáo 
 | Tầng Kiến Trúc | Mô Hình / Công Nghệ Sử Dụng | Mức Chiếm Dụng VRAM (T4 16GB) | Chức Năng Trong Pipeline Hợp Nhất | 
 | ----- | ----- | ----- | ----- | 
 | **1. Core VLM & LLM (2-trong-1)** | [Qwen/Qwen2.5-VL-7B-Instruct-AWQ](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct-AWQ) (hoặc bản nhẹ [Qwen/Qwen2.5-VL-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct)) | \~5.8 GB (AWQ 4-bit) | Đọc trực tiếp ảnh chụp bảng BCTC scan ra JSON chuẩn cột VAS; tự động đọc lại (Self-Correction) khi tổng kiểm toán bị lệch; đóng vai trò LLM tổng hợp câu trả lời thuyết minh. | 
-| **2. Digital PDF & Layout Parser** | `PyMuPDF` / `pdfplumber` + [IBM Docling](https://github.com/docling-project/docling) ([docling-ibm-models](https://github.com/docling-project/docling-ibm-models)) | \~0.5 GB (hoặc CPU) | Bóc tách nhanh các trang PDF điện tử có sẵn text layer; khoanh vùng tọa độ bảng (`bbox`) để chỉ gửi các trang chứa bảng tài chính scan vào VLM. | 
+| **2. Digital PDF & Layout Parser** | `pdfplumber` + `pypdfium2` + `pypdf` | CPU | Đọc text và bảng từ PDF điện tử; render các trang PDF scan thành ảnh để gửi vào VLM. | 
 | **3. Multilingual Embedding** | [BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3) | \~1.2 GB (FP16) | Biểu diễn ngữ nghĩa đa ngôn ngữ Việt – Anh với độ dài ngữ cảnh tới 8192 tokens, kết hợp cùng tìm kiếm từ khóa `SQLite FTS5` theo thuật toán Reciprocal Rank Fusion (RRF). | 
 | **4. Cross-Encoder Reranker** | [BAAI/bge-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3) | \~1.1 GB (FP16) | Chấm điểm xếp hạng lại các đoạn văn/bảng truy xuất được, ngăn chặn việc lấy nhầm số liệu giữa báo cáo "Công ty mẹ" và "Hợp nhất". | 
 | **5. Kiểm Toán & Tính Toán Tất Định** | `VASAccountingQualityGate` + `DeterministicFinancialCalculator` (`Decimal`) | 0 GB (CPU thuần) | Kiểm tra chéo 7 đẳng thức kế toán Thông tư 200 ngay khi đọc bảng và tính toán YoY, ROE, ROA, Biên lợi nhuận với độ chính xác tuyệt đối. | 
@@ -53,7 +53,7 @@ Một cải tiến quan trọng trong `unified_financial_rag_colab_t4.py` là s�
 pip install -q torch torchvision torchaudio
 pip install -q "transformers>=4.49.0" accelerate autoawq qwen-vl-utils
 pip install -q sentence-transformers faiss-cpu FlagEmbedding
-pip install -q docling pdfplumber gradio pytest
+pip install -q pdfplumber pypdfium2 pypdf gradio pytest
 
 ```
 
