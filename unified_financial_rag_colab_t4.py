@@ -4,28 +4,31 @@ Unified Financial Multimodal RAG Pipeline (Optimized for Google Colab T4 16GB VR
 Hợp nhất kiến trúc từ 2 nhánh dự án:
 1. Nhánh Main (`src/multimodal_rag`):
    - Chuẩn hóa chỉ tiêu kế toán Việt Nam (VAS) & quốc tế (IFRS/US-GAAP) (`VASMetricRegistry`)
+   - Chuẩn hóa bảng mã Unicode NFC tự động (xử lý triệt để PDF tiếng Việt bị tách dấu tổ hợp NFD)
    - Kiểm tra chéo đẳng thức kế toán tự động (`VASAccountingQualityGate`: 270=100+200, 440=300+400,
      270=440, 20=10-11, 60=50-51-52, 50=20+30+40, 70=50+60+61)
    - Tính toán tất định bằng `Decimal` (`DeterministicFinancialCalculator`: Lookup, YoY, Ratio,
      Multi-metric summary, Reconciliation report) — tuyệt đối không để LLM tự tính nhẩm.
-   - Lưu vết tọa độ `bbox` và `page` tới từng `Observation`.
+   - Lưu vết tọa độ `bbox` và `page` tới từng `FinancialFact`.
 
 2. Nhánh Colab T4 (`Financial-Multimodal-RAG-review-20261020` - nhánh `Thien`):
-   - Lưu trữ bền vững với `SQLiteStore` (kèm FTS5 full-text search) + `FAISS` vector index
-   - Truy xuất lai `HybridRetriever` (`BAAI/bge-m3` Dense + Sparse/FTS5 + `BAAI/bge-reranker-v2-m3`)
-   - Mô hình đa phương thức dùng chung (`SharedQwenVLBackbone` với `Qwen/Qwen2.5-VL-7B-Instruct-AWQ`
-     hoặc `Qwen/Qwen2.5-VL-3B-Instruct`): vừa đọc bảng BCTC scan (kèm vòng lặp Self-Correction khi
-     lệch đẳng thức kế toán VAS), vừa đóng vai trò Semantic Router & Answer Synthesizer.
-   - Đã khắc phục triệt để 8 lỗi trong `REVIEW_20261020.md`.
+   - Lưu trữ bền vững với `UnifiedSQLiteStore` (kèm FTS5 full-text search) + `FAISS` vector index
+   - Truy xuất lai `HybridFinancialRetriever` (`BAAI/bge-m3` Dense + Sparse/FTS5 + `BAAI/bge-reranker-v2-m3`)
+   - Mô hình đa phương thức dùng chung (`SharedQwenVLBackbone` với cơ chế tự động fallback:
+     `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` -> `Qwen/Qwen2.5-VL-3B-Instruct` FP16): vừa đọc bảng BCTC scan
+     (kèm vòng lặp Self-Correction khi lệch đẳng thức kế toán VAS), vừa đóng vai trò LLM trả lời RAG.
+   - Đã khắc phục triệt để 8 lỗi trong `REVIEW_20261020.md` và 6 lỗi thực chiến khi nạp PDF trên Gradio.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import re
 import sqlite3
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -37,6 +40,17 @@ if not logger.handlers:
     handler.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
+
+
+def normalize_vn_text(text: Optional[str]) -> str:
+    """
+    Chuẩn hóa chuỗi tiếng Việt về Unicode dựng sẵn (NFC).
+    Khắc phục triệt để lỗi nhiều file PDF BCTC xuất từ Word/Excel/MISA dùng mã tổ hợp (NFD)
+    khiến phép so sánh chuỗi tiếng Việt bị trượt.
+    """
+    if not text:
+        return ""
+    return unicodedata.normalize("NFC", str(text))
 
 
 # ==============================================================================
@@ -135,7 +149,148 @@ class QualityReport:
 
 
 # ==============================================================================
-# 2. VAS METRIC REGISTRY (Hợp nhất từ `company_registry.py` & `ocr_recovery.py`)
+# 2. CÁC BỘ CHUẨN HÓA ĐƠN VỊ, PHẠM VI BÁO CÁO & CACHE (UPGRADES V2)
+# ==============================================================================
+
+class UnitScaleNormalizer:
+    """
+    Tự động phát hiện và chuẩn hóa Đơn vị tiền tệ trên đầu trang BCTC
+    ("Đơn vị tính: Triệu đồng", "Tỷ đồng", "Nghìn đồng", "VND", "Million USD").
+    """
+
+    UNIT_PATTERNS: Tuple[Tuple[str, str, float], ...] = (
+        (r"đơn\s*vị\s*tính\s*[:\-]?\s*tỷ\s*(?:đồng|vnd|vnđ)", "VND", 1_000_000_000.0),
+        (r"đơn\s*vị\s*tính\s*[:\-]?\s*triệu\s*(?:đồng|vnd|vnđ)", "VND", 1_000_000.0),
+        (r"đơn\s*vị\s*tính\s*[:\-]?\s*(?:nghìn|ngàn)\s*(?:đồng|vnd|vnđ)", "VND", 1_000.0),
+        (r"đơn\s*vị\s*tính\s*[:\-]?\s*(?:đồng|vnd|vnđ)", "VND", 1.0),
+        (r"\(\s*in\s+millions?\s*(?:of\s+usd|\$)?\s*\)", "USD", 1_000_000.0),
+        (r"\(\s*in\s+thousands?\s*(?:of\s+usd|\$)?\s*\)", "USD", 1_000.0),
+    )
+
+    @classmethod
+    def detect_unit_and_multiplier(cls, page_text: str, default_unit: str = "VND") -> Tuple[str, float]:
+        norm = normalize_vn_text(page_text).lower()
+        for pattern, base_unit, multiplier in cls.UNIT_PATTERNS:
+            if re.search(pattern, norm, flags=re.I):
+                return base_unit, multiplier
+        return default_unit, 1.0
+
+    @classmethod
+    def detect_display_unit(cls, page_text: str, default_unit: str = "VND") -> str:
+        norm = normalize_vn_text(page_text).lower()
+        if re.search(r"đơn\s*vị\s*tính\s*[:\-]?\s*tỷ\s*(?:đồng|vnd|vnđ)", norm, flags=re.I):
+            return "Tỷ VND"
+        if re.search(r"đơn\s*vị\s*tính\s*[:\-]?\s*triệu\s*(?:đồng|vnd|vnđ)", norm, flags=re.I):
+            return "Triệu VND"
+        if re.search(r"\(\s*in\s+millions?\s*(?:of\s+usd|\$)?\s*\)", norm, flags=re.I):
+            return "Triệu USD"
+        return default_unit
+
+    @classmethod
+    def normalize_facts(cls, facts: Sequence[FinancialFact], page_text: str) -> List[FinancialFact]:
+        base_unit, multiplier = cls.detect_unit_and_multiplier(page_text)
+        if multiplier == 1.0:
+            return list(facts)
+        normalized: List[FinancialFact] = []
+        for f in facts:
+            scaled_val = float(Decimal(str(f.value)) * Decimal(str(multiplier)))
+            normalized.append(
+                FinancialFact(
+                    company=f.company,
+                    period=f.period,
+                    metric_code=f.metric_code,
+                    metric_name=f.metric_name,
+                    value=scaled_val,
+                    unit=base_unit,
+                    vas_code=f.vas_code,
+                    statement_type=f.statement_type,
+                    report_scope=f.report_scope,
+                    page=f.page,
+                    bbox=f.bbox,
+                    raw_text=f.raw_text,
+                    confidence=f.confidence,
+                    extraction_method=f.extraction_method,
+                )
+            )
+        return normalized
+
+
+class ReportScopeDetector:
+    """
+    Tự động phân biệt BCTC Hợp nhất (`consolidated`) và BCTC Riêng / Công ty mẹ (`separate`).
+    """
+
+    @staticmethod
+    def detect_scope(text: str) -> str:
+        t = normalize_vn_text(text).lower()
+        if any(k in t for k in ("báo cáo tài chính riêng", "bctc riêng", "công ty mẹ", "separate financial")):
+            return "separate"
+        return "consolidated"
+
+
+class PageOCRCacheManager:
+    """
+    Lưu bộ nhớ đệm (Persistent SQLite Cache) theo mã băm SHA-256 của trang scan.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vlm_ocr_cache (
+                page_hash TEXT PRIMARY KEY,
+                statement_hint TEXT,
+                rows_json TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.commit()
+
+    @staticmethod
+    def compute_hash(image_repr: Any, correction_hint: Optional[str] = None) -> str:
+        payload = f"{repr(image_repr)}||{correction_hint or ''}".encode("utf-8", errors="ignore")
+        return hashlib.sha256(payload).hexdigest()
+
+    def get_cached_rows(self, page_hash: str) -> Optional[List[List[str]]]:
+        row = self.conn.execute(
+            "SELECT rows_json FROM vlm_ocr_cache WHERE page_hash = ?", (page_hash,)
+        ).fetchone()
+        if not row:
+            return None
+        return json.loads(row[0])
+
+    def save_cached_rows(self, page_hash: str, rows: List[List[str]], statement_hint: str = "") -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO vlm_ocr_cache (page_hash, statement_hint, rows_json) VALUES (?, ?, ?)",
+            (page_hash, statement_hint, json.dumps(rows, ensure_ascii=False)),
+        )
+        self.conn.commit()
+
+
+class CrossPeriodAnomalyDetector:
+    """
+    Kiểm tra bất thường liên kỳ (Cross-Period Balance Sheet Continuity Check).
+    """
+
+    @staticmethod
+    def verify_cash_continuity(
+        ending_cash_prev: Union[float, Decimal],
+        beginning_cash_curr: Union[float, Decimal],
+        tolerance: float = 1.0,
+    ) -> Dict[str, Any]:
+        prev_dec = Decimal(str(ending_cash_prev))
+        curr_dec = Decimal(str(beginning_cash_curr))
+        diff = abs(curr_dec - prev_dec)
+        return {
+            "is_continuous": float(diff) <= tolerance,
+            "ending_cash_previous_period": float(prev_dec),
+            "beginning_cash_current_period": float(curr_dec),
+            "difference": float(diff),
+        }
+
+
+# ==============================================================================
+# 3. VAS METRIC REGISTRY (Hợp nhất từ `company_registry.py` & `ocr_recovery.py`)
 # ==============================================================================
 
 @dataclass(frozen=True)
@@ -161,12 +316,16 @@ class VASMetricRegistry:
                       ("tài sản ngắn hạn", "tai san ngan han", "current assets", "total current assets")),
         VASMetricSpec("cash_and_equivalents", "110", "Tiền và các khoản tương đương tiền", "Cash and Cash Equivalents", "balance_sheet",
                       ("tiền và các khoản tương đương tiền", "tien va cac khoan tuong duong tien", "cash and cash equivalents")),
+        VASMetricSpec("short_term_investments", "120", "Đầu tư tài chính ngắn hạn", "Short-term Financial Investments", "balance_sheet",
+                      ("đầu tư tài chính ngắn hạn", "dau tu tai chinh ngan han", "short-term investments")),
         VASMetricSpec("short_term_receivables", "130", "Các khoản phải thu ngắn hạn", "Short-term Receivables", "balance_sheet",
                       ("các khoản phải thu ngắn hạn", "phải thu ngắn hạn", "accounts receivable")),
         VASMetricSpec("inventories", "140", "Hàng tồn kho", "Inventories", "balance_sheet",
                       ("hàng tồn kho", "hang ton kho", "inventories", "inventory")),
         VASMetricSpec("long_term_assets", "200", "Tài sản dài hạn", "Non-current Assets", "balance_sheet",
                       ("tài sản dài hạn", "tai san dai han", "non-current assets", "long-term assets")),
+        VASMetricSpec("fixed_assets", "220", "Tài sản cố định", "Fixed Assets", "balance_sheet",
+                      ("tài sản cố định", "tai san co dinh", "fixed assets", "property, plant and equipment")),
         VASMetricSpec("total_assets", "270", "Tổng cộng tài sản", "Total Assets", "balance_sheet",
                       ("tổng cộng tài sản", "tong cong tai san", "tổng tài sản", "total assets")),
         VASMetricSpec("liabilities", "300", "Nợ phải trả", "Total Liabilities", "balance_sheet",
@@ -177,6 +336,8 @@ class VASMetricRegistry:
                       ("nợ dài hạn", "no dai han", "long-term liabilities", "non-current liabilities")),
         VASMetricSpec("owners_equity", "400", "Vốn chủ sở hữu", "Owners' Equity", "balance_sheet",
                       ("vốn chủ sở hữu", "von chu so huu", "owners' equity", "shareholders' equity", "total equity")),
+        VASMetricSpec("undistributed_profit", "421", "Lợi nhuận sau thuế chưa phân phối", "Retained Earnings", "balance_sheet",
+                      ("lợi nhuận sau thuế chưa phân phối", "loi nhuan sau thue chua phan phoi", "retained earnings")),
         VASMetricSpec("total_resources", "440", "Tổng cộng nguồn vốn", "Total Liabilities and Equity", "balance_sheet",
                       ("tổng cộng nguồn vốn", "tong cong nguon von", "tổng nguồn vốn", "total liabilities and shareholders' equity", "total liabilities and equity")),
 
@@ -235,14 +396,12 @@ class VASMetricRegistry:
             self.by_statement_and_vas[(s.statement_type, clean_vas)] = s
 
     def match(self, raw_label: str, vas_code: Optional[str] = None, statement_type: Optional[str] = None) -> Optional[VASMetricSpec]:
-        norm_label = re.sub(r"\s+", " ", (raw_label or "").strip().lower())
+        norm_label = re.sub(r"\s+", " ", normalize_vn_text(raw_label).strip().lower())
         clean_vas = (vas_code or "").strip().replace("_CF", "")
 
-        # Ưu tiên khớp chính xác theo (statement_type, vas_code) nếu có
         if clean_vas and statement_type and (statement_type, clean_vas) in self.by_statement_and_vas:
             return self.by_statement_and_vas[(statement_type, clean_vas)]
 
-        # Khớp theo alias văn bản (ưu tiên alias dài nhất trước để tránh "doanh thu" nuốt "doanh thu thuần")
         best_spec: Optional[VASMetricSpec] = None
         best_len = 0
         for spec in self.SPECS:
@@ -255,7 +414,6 @@ class VASMetricRegistry:
         if best_spec is not None:
             return best_spec
 
-        # Fallback theo vas_code nếu không rõ statement_type (cho các mã duy nhất như 100, 200, 270, 300, 400, 440, 10, 11)
         if clean_vas:
             unique_candidates = [
                 spec for (st, vc), spec in self.by_statement_and_vas.items() if vc == clean_vas
@@ -266,16 +424,15 @@ class VASMetricRegistry:
 
 
 # ==============================================================================
-# 3. FACT EXTRACTOR & NUMBER PARSER (Vá lỗi #5 từ `REVIEW_20261020.md`)
+# 4. FACT EXTRACTOR & NUMBER PARSER (Vá lỗi #5 & lỗi ô trống từ `pdfplumber`)
 # ==============================================================================
 
 class FactExtractor:
     """
     Trích xuất các chỉ tiêu tài chính từ bảng/văn bản.
-    ĐÃ VÁ LỖI #5 TRONG REVIEW_20261020.md:
-    - Bảo toàn đầy đủ số âm dạng ngoặc đơn kế toán `(1.234.567)` hoặc dấu trừ `-1,234,567`
-      cũng như giá trị `0` (trước đây `return val if val and val > 0 else None` làm mất sạch
-      các khoản lỗ, dòng tiền âm và giảm trừ doanh thu).
+    - Bảo toàn đầy đủ số âm dạng ngoặc đơn kế toán `(1.234.567)` hoặc dấu trừ `-1,234,567` và số `0`.
+    - Loại bỏ các ô trống (`""` / `None`) sinh ra bởi merged cells trong `pdfplumber` trước khi
+      nhận diện cột Mã số VAS và Thuyết minh, ngăn chặn triệt để lỗi lấy nhầm Mã số VAS làm Số tiền.
     """
 
     def __init__(self, registry: Optional[VASMetricRegistry] = None) -> None:
@@ -283,21 +440,13 @@ class FactExtractor:
 
     @staticmethod
     def clean_number(raw: Union[str, int, float, Decimal, None]) -> Optional[float]:
-        """
-        Chuyển đổi chuỗi số kế toán Việt Nam / Quốc tế sang float:
-        - Hỗ trợ số âm trong ngoặc đơn: `(1.250.000)` -> `-1250000.0`
-        - Hỗ trợ dấu trừ trực tiếp: `-1,250.50` -> `-1250.5`
-        - Hỗ trợ phân biệt dấu chấm phân cách hàng nghìn của VN (`1.234.567`)
-          và dấu chấm thập phân quốc tế (`1,234.56`).
-        - Bảo toàn cả giá trị âm, 0 và dương.
-        """
         if raw is None:
             return None
         if isinstance(raw, (int, float, Decimal)):
             val = float(raw)
             return None if math.isnan(val) or math.isinf(val) else val
 
-        text = str(raw).strip()
+        text = normalize_vn_text(str(raw)).strip()
         if not text or text in {"-", "—", "–", "N/A", "n/a", "nil", ""}:
             return None
 
@@ -310,6 +459,10 @@ class FactExtractor:
 
         if not text or not re.search(r"\d", text):
             return None
+
+        # Xử lý khoảng trắng phân cách hàng nghìn (ví dụ: "9 315 420")
+        if re.fullmatch(r"\d{1,3}(?:\s+\d{3})+", text):
+            text = re.sub(r"\s+", "", text)
 
         dots = text.count(".")
         commas = text.count(",")
@@ -359,37 +512,57 @@ class FactExtractor:
         statement_type: str = "unknown",
         page: int = 1,
         unit: str = "VND",
+        report_scope: str = "consolidated",
         extraction_method: str = "digital_text",
     ) -> List[FinancialFact]:
         """
         Bóc tách danh sách `FinancialFact` từ bảng 2 chiều (list các dòng).
-        Hỗ trợ cấu trúc cột chuẩn VAS: [Chỉ tiêu, Mã số, Thuyết minh, Số cuối năm, Số đầu năm]
-        hoặc bảng rút gọn [Chỉ tiêu, Mã số, Số cuối năm, Số đầu năm].
+        Tự động lọc bỏ các ô trống `""` do `pdfplumber` tách cột gộp, đảm bảo nhận diện
+        đúng cột Mã số VAS và Thuyết minh trước khi lấy giá trị số cuối kỳ.
         """
         facts: List[FinancialFact] = []
+        known_vas_codes = {s.vas_code.replace("_CF", "") for s in self.registry.SPECS}
+
         for row_idx, row in enumerate(rows):
-            cells = [str(c).strip() if c is not None else "" for c in row]
-            if not any(cells):
+            raw_cells = [normalize_vn_text(str(c)).strip() if c is not None else "" for c in row]
+            non_empty = [c for c in raw_cells if c]
+            if len(non_empty) < 2:
                 continue
 
-            label = cells[0]
-            if not label or re.match(r"^(chỉ tiêu|mã số|thuyết minh|số cuối năm|items|code|note)$", label, re.I):
+            # Nếu cột đầu tiên chỉ là số thứ tự La Mã hoặc chữ cái (I, II, A, B, 1, 2) thì ghép với cột tiếp theo
+            if re.fullmatch(r"(?:[IVX]+|[A-Z]|\d{1,2})[\.)]?", non_empty[0]) and len(non_empty) >= 3:
+                label = f"{non_empty[0]} {non_empty[1]}"
+                tail_cells = non_empty[2:]
+            else:
+                label = non_empty[0]
+                tail_cells = non_empty[1:]
+
+            if not label or re.match(r"^(chỉ tiêu|mã số|thuyết minh|số cuối năm|số cuối kỳ|items|code|note|đơn vị tính)$", label, re.I):
                 continue
 
             vas_code: Optional[str] = None
             numeric_candidates: List[float] = []
 
-            for col_idx, cell in enumerate(cells[1:], start=1):
-                clean_cell = cell.strip()
-                if not clean_cell:
-                    continue
-                # Nhận diện cột Mã số VAS ở cột 1 (gồm 2 hoặc 3 chữ số như 01, 10, 20, 100, 270, 440)
-                if vas_code is None and col_idx == 1 and re.fullmatch(r"\d{2,3}", clean_cell):
-                    vas_code = clean_cell
-                    continue
-                # Nhận diện cột Thuyết minh ở cột 2 (ví dụ: V.01, VI.2, TM.05, hoặc mục nhỏ 1-2 chữ số như 4.1)
-                if col_idx == 2 and re.fullmatch(r"([IVX]+\.\d+|TM\.?\d+|\d{1,2}\.\d{1,2})", clean_cell, re.I):
-                    continue
+            for idx, clean_cell in enumerate(tail_cells):
+                # 1. Nếu là ô đầu tiên sau tên chỉ tiêu, có 2-3 chữ số và phía sau vẫn còn ít nhất 1 ô số liệu -> Mã số VAS
+                if (
+                    vas_code is None
+                    and idx == 0
+                    and re.fullmatch(r"\d{2,3}", clean_cell)
+                    and (len(tail_cells) >= 2 or clean_cell in known_vas_codes)
+                ):
+                    if len(tail_cells) >= 2:
+                        vas_code = clean_cell
+                        continue
+
+                # 2. Nhận diện ô Thuyết minh (ví dụ: V.01, VI.2, TM.05, 3(a), hoặc số mục 4.1 khi phía sau vẫn còn ô số tiền)
+                if idx <= 1 and re.fullmatch(
+                    r"(?:[IVX]+\.\d+[a-z]?|TM\.?\d+|\d{1,2}\.\d{1,2}|\d{1,2}\([a-z]\))",
+                    clean_cell,
+                    re.I,
+                ):
+                    if len(tail_cells) - idx >= 2:
+                        continue
 
                 val = self.clean_number(clean_cell)
                 if val is not None:
@@ -415,9 +588,10 @@ class FactExtractor:
                     unit=unit,
                     vas_code=resolved_vas,
                     statement_type=resolved_statement,
+                    report_scope=report_scope,
                     page=page,
                     bbox=[0.0, float(row_idx * 20), 595.0, float((row_idx + 1) * 20)],
-                    raw_text=" | ".join(cells),
+                    raw_text=" | ".join(non_empty),
                     extraction_method=extraction_method,
                 )
             )
@@ -425,22 +599,12 @@ class FactExtractor:
 
 
 # ==============================================================================
-# 4. VAS ACCOUNTING QUALITY GATE (Hợp nhất từ `src/multimodal_rag/quality.py`)
+# 5. VAS ACCOUNTING QUALITY GATE (Hợp nhất từ `src/multimodal_rag/quality.py`)
 # ==============================================================================
 
 class VASAccountingQualityGate:
     """
-    Kiểm tra chéo các đẳng thức kế toán bắt buộc của BCTC Việt Nam (Thông tư 200):
-    1. Bảng cân đối kế toán (Balance Sheet):
-       - Mã 270 (Tổng tài sản) = Mã 100 (Tài sản ngắn hạn) + Mã 200 (Tài sản dài hạn)
-       - Mã 440 (Tổng nguồn vốn) = Mã 300 (Nợ phải trả) + Mã 400 (Vốn chủ sở hữu)
-       - Mã 270 (Tổng tài sản) = Mã 440 (Tổng nguồn vốn)
-    2. Báo cáo kết quả kinh doanh (Income Statement):
-       - Mã 20 (Lợi nhuận gộp) = Mã 10 (Doanh thu thuần) - Mã 11 (Giá vốn hàng bán)
-       - Mã 60 (Lợi nhuận sau thuế) = Mã 50 (LN trước thuế) - Mã 51 (Thuế hiện hành) - Mã 52 (Thuế hoãn lại)
-    3. Báo cáo lưu chuyển tiền tệ (Cash Flow):
-       - Mã 50 (Lưu chuyển tiền thuần trong kỳ) = Mã 20 (HĐKD) + Mã 30 (HĐĐT) + Mã 40 (HĐTC)
-       - Mã 70 (Tiền cuối kỳ) = Mã 50 (LCTT trong kỳ) + Mã 60 (Tiền đầu kỳ) + Mã 61 (Ảnh hưởng tỷ giá)
+    Kiểm tra chéo 7 đẳng thức kế toán bắt buộc của BCTC Việt Nam (Thông tư 200).
     """
 
     def __init__(self, tolerance: Decimal = Decimal("1.0")) -> None:
@@ -476,7 +640,6 @@ class VASAccountingQualityGate:
 
         checks: List[ReconciliationCheckResult] = []
 
-        # Rule 1: BS 270 = 100 + 200
         bs_270 = get_bs("270", "total_assets")
         bs_100 = get_bs("100", "short_term_assets")
         bs_200 = get_bs("200", "long_term_assets")
@@ -491,7 +654,6 @@ class VASAccountingQualityGate:
             codes=["100", "200", "270"],
         ))
 
-        # Rule 2: BS 440 = 300 + 400
         bs_440 = get_bs("440", "total_resources")
         bs_300 = get_bs("300", "liabilities")
         bs_400 = get_bs("400", "owners_equity")
@@ -506,7 +668,6 @@ class VASAccountingQualityGate:
             codes=["300", "400", "440"],
         ))
 
-        # Rule 3: BS 270 = 440
         checks.append(self._check_sum(
             rule_id="BS_270_EQ_440",
             statement_type="balance_sheet",
@@ -518,7 +679,6 @@ class VASAccountingQualityGate:
             codes=["270", "440"],
         ))
 
-        # Rule 4: IS 20 = 10 - 11
         is_20 = get_is("20", "gross_profit")
         is_10 = get_is("10", "net_revenue")
         is_11 = get_is("11", "cogs")
@@ -536,7 +696,6 @@ class VASAccountingQualityGate:
             codes=["10", "11", "20"],
         ))
 
-        # Rule 5: IS 60 = 50 - 51 - 52
         is_60 = get_is("60", "net_profit")
         is_50 = get_is("50", "profit_before_tax")
         is_51 = get_is("51", "current_tax_expense")
@@ -556,7 +715,6 @@ class VASAccountingQualityGate:
             codes=["50", "51", "52", "60"],
         ))
 
-        # Rule 6: CF 50 = 20 + 30 + 40
         cf_50 = get_cf("50", "net_cash_flow")
         cf_20 = get_cf("20", "operating_cash_flow")
         cf_30 = get_cf("30", "investing_cash_flow")
@@ -572,7 +730,6 @@ class VASAccountingQualityGate:
             codes=["20", "30", "40", "50"],
         ))
 
-        # Rule 7: CF 70 = 50 + 60 + 61
         cf_70 = get_cf("70", "ending_cash")
         cf_60 = get_cf("60", "beginning_cash")
         cf_61 = get_cf("61", "fx_impact_on_cash")
@@ -653,21 +810,16 @@ class VASAccountingQualityGate:
 
 
 # ==============================================================================
-# 5. SHARED QWEN2.5-VL BACKBONE & SMART PDF PARSER (Vá lỗi #1 & #2)
+# 6. SHARED QWEN2.5-VL BACKBONE & SMART PDF PARSER (Vá lỗi #1, #2 & Auto Fallback)
 # ==============================================================================
 
 class SharedQwenVLBackbone:
     """
     Mô hình 2-trong-1 tối ưu cho Google Colab T4 (16GB VRAM):
-    Sử dụng `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` (~5.8GB VRAM) hoặc `Qwen/Qwen2.5-VL-3B-Instruct`:
-    1. Chế độ Vision-OCR (`extract_table_rows_from_image`):
-       Nhận ảnh chụp vùng bảng BCTC (đặc biệt là trang scan mờ/mất đường kẻ) và xuất thẳng
-       ra danh sách dòng JSON chuẩn `["Tên chỉ tiêu", "Mã số", "Thuyết minh", "Số cuối năm", "Số đầu năm"]`.
-    2. Chế độ Self-Correction:
-       Khi `VASAccountingQualityGate` phát hiện lệch đẳng thức kế toán (ví dụ: 270 != 100 + 200),
-       VLM được gọi lại kèm công thức đang lệch để kiểm tra lại chính xác chữ số bị nhầm.
-    3. Chế độ Text RAG (`generate_text`):
-       Tổng hợp câu trả lời tiếng Việt từ ngữ cảnh Thuyết minh BCTC và kết quả tính toán tất định.
+    - Thử nạp `model_id` (mặc định `Qwen/Qwen2.5-VL-7B-Instruct-AWQ`).
+    - Nếu môi trường Colab chưa cài `autoawq` hoặc thiếu VRAM, tự động fallback sang
+      `Qwen/Qwen2.5-VL-3B-Instruct` ở chế độ `torch.float16` chuẩn (chỉ tốn ~6.2GB VRAM,
+      không cần thư viện lượng tử hóa bên ngoài).
     """
 
     DEFAULT_MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct-AWQ"
@@ -687,27 +839,37 @@ class SharedQwenVLBackbone:
             self.load_model()
 
     def load_model(self) -> None:
-        """Nạp mô hình lên GPU Colab T4 với cơ chế tiết kiệm VRAM tối đa."""
+        """Nạp mô hình lên GPU Colab T4 với cơ chế tự động fallback sang bản 3B nếu thiếu AWQ."""
         if self.model is not None or self.mock_vlm_callable is not None:
             return
         try:
             import torch
             from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
-            logger.info("Đang nạp Shared VLM/LLM Backbone: %s ...", self.model_id)
-            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                self.model_id,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else "auto",
-                device_map="auto",
-            )
-            self.processor = AutoProcessor.from_pretrained(
-                self.model_id,
-                min_pixels=256 * 28 * 28,
-                max_pixels=1280 * 28 * 28,
-            )
-            logger.info("Đã nạp thành công %s lên thiết bị.", self.model_id)
+            candidates = [self.model_id]
+            if self.FALLBACK_MODEL_ID not in candidates:
+                candidates.append(self.FALLBACK_MODEL_ID)
+
+            for candidate_id in candidates:
+                try:
+                    logger.info("Đang nạp Shared VLM/LLM Backbone: %s ...", candidate_id)
+                    self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                        candidate_id,
+                        torch_dtype=torch.float16 if torch.cuda.is_available() else "auto",
+                        device_map="auto",
+                    )
+                    self.processor = AutoProcessor.from_pretrained(
+                        candidate_id,
+                        min_pixels=256 * 28 * 28,
+                        max_pixels=1280 * 28 * 28,
+                    )
+                    self.model_id = candidate_id
+                    logger.info("Đã nạp thành công %s lên thiết bị.", candidate_id)
+                    return
+                except Exception as inner_exc:
+                    logger.warning("Không thể nạp %s (%s). Đang thử phương án dự phòng...", candidate_id, inner_exc)
         except Exception as exc:
-            logger.warning("Không thể nạp GPU model (%s). Chuyển sang chế độ Rule/Mock Fallback.", exc)
+            logger.warning("Chuyển sang chế độ Rule/Deterministic Fallback (%s).", exc)
 
     def extract_table_rows_from_image(
         self,
@@ -715,9 +877,6 @@ class SharedQwenVLBackbone:
         statement_hint: str = "balance_sheet",
         correction_hint: Optional[str] = None,
     ) -> List[List[str]]:
-        """
-        Gửi ảnh trang/vùng bảng BCTC vào Qwen2.5-VL để bóc tách cấu trúc bảng chính xác.
-        """
         prompt = (
             "Bạn là hệ thống OCR chuyên dụng cho Báo cáo tài chính Việt Nam (VAS). "
             "Hãy đọc bảng trong ảnh và trả về DUY NHẤT một JSON array gồm các dòng, "
@@ -764,7 +923,6 @@ class SharedQwenVLBackbone:
         return self._parse_json_rows(output_text)
 
     def generate_text(self, system_prompt: str, user_prompt: str) -> str:
-        """Sử dụng chính Qwen2.5-VL ở chế độ text-only làm LLM trả lời RAG (tiết kiệm 100% VRAM nạp LLM thứ hai)."""
         if self.mock_vlm_callable is not None:
             return self.mock_vlm_callable(f"{system_prompt}\n{user_prompt}", None)
 
@@ -794,7 +952,7 @@ class SharedQwenVLBackbone:
         try:
             parsed = json.loads(match.group(0))
             if isinstance(parsed, list):
-                return [[str(cell) for cell in row] for row in parsed if isinstance(row, list)]
+                return [[normalize_vn_text(str(cell)) for cell in row] for row in parsed if isinstance(row, list)]
         except json.JSONDecodeError:
             pass
         return []
@@ -802,16 +960,8 @@ class SharedQwenVLBackbone:
 
 class SmartFinancialPDFParser:
     """
-    Bộ đọc PDF đa tầng khắc phục triệt để Lỗi #1 và Lỗi #2 trong `REVIEW_20261020.md`:
-    1. Kiểm tra chéo nội dung thực của PDF với nhãn `expected_company` / `expected_period`
-       (`verify_document_identity`) — chặn ngay trường hợp file `NVDA_10K_2024_sample.pdf`
-       nhưng ruột lại là Analog Devices 2009.
-    2. Phân loại từng trang PDF:
-       - Nếu trang có digital text layer: trích xuất văn bản + bảng qua `pdfplumber` / `Docling`.
-       - Nếu trang là ảnh scan (`len(text.strip()) < 40`): tự động chuyển sang nhánh VLM OCR
-         (`SharedQwenVLBackbone`) thay vì trả về 0 chunks / 0 facts.
-    3. `validate_extraction()` kiểm tra chặt: nếu `len(chunks) == 0` và `len(facts) == 0`
-       thì bắt buộc trả về `is_valid = False` (sửa lỗi `is_valid=True` giả tạo ở nhánh cũ).
+    Bộ đọc PDF đa tầng khắc phục triệt để Lỗi #1 và Lỗi #2 trong `REVIEW_20261020.md`.
+    Tích hợp trực tiếp `ReportScopeDetector`, `UnitScaleNormalizer` và `PageOCRCacheManager`.
     """
 
     COMPANY_ALIASES: Dict[str, Tuple[str, ...]] = {
@@ -820,6 +970,9 @@ class SmartFinancialPDFParser:
         "VCB": ("vietcombank", "ngoại thương việt nam", "vcb"),
         "VIC": ("vingroup", "tập đoàn vingroup", "vic"),
         "HPG": ("hòa phát", "hoa phat", "hpg"),
+        "MWG": ("thế giới di động", "the gioi di dong", "mwg"),
+        "TCB": ("techcombank", "kỹ thương việt nam", "tcb"),
+        "MBB": ("mb bank", "quân đội", "mbb"),
         "NVDA": ("nvidia", "nvidia corporation", "nvda"),
         "ADI": ("analog devices", "analog devices, inc"),
     }
@@ -829,18 +982,28 @@ class SmartFinancialPDFParser:
         fact_extractor: Optional[FactExtractor] = None,
         vlm_backbone: Optional[SharedQwenVLBackbone] = None,
         quality_gate: Optional[VASAccountingQualityGate] = None,
+        ocr_cache: Optional[PageOCRCacheManager] = None,
     ) -> None:
         self.fact_extractor = fact_extractor or FactExtractor()
         self.vlm_backbone = vlm_backbone or SharedQwenVLBackbone(lazy_load=True)
         self.quality_gate = quality_gate or VASAccountingQualityGate()
+        self.ocr_cache = ocr_cache
 
     @staticmethod
     def _contains_alias(text: str, aliases: Iterable[str]) -> bool:
+        norm = normalize_vn_text(text).lower()
         for alias in aliases:
-            pattern = rf"(?<!\w){re.escape(alias.lower())}(?!\w)"
-            if re.search(pattern, text):
+            pattern = rf"(?<!\w){re.escape(normalize_vn_text(alias).lower())}(?!\w)"
+            if re.search(pattern, norm):
                 return True
         return False
+
+    def detect_company_from_text(self, text: str) -> Optional[str]:
+        norm = normalize_vn_text(text).lower()
+        for code, aliases in self.COMPANY_ALIASES.items():
+            if self._contains_alias(norm, aliases):
+                return code
+        return None
 
     def verify_document_identity(
         self,
@@ -848,12 +1011,7 @@ class SmartFinancialPDFParser:
         expected_company: str,
         expected_period: str,
     ) -> Tuple[bool, str]:
-        """
-        VÁ LỖI #1 TRONG REVIEW_20261020.md:
-        Kiểm tra nội dung trang đầu của báo cáo xem có khớp với mã công ty & năm kỳ vọng không.
-        Phát hiện ngay trường hợp file tên là NVDA 2024 nhưng nội dung là Analog Devices 2009.
-        """
-        norm_text = (first_pages_text or "").lower()
+        norm_text = normalize_vn_text(first_pages_text).lower()
         if not norm_text.strip():
             return True, "pending_ocr_verification"
 
@@ -885,8 +1043,8 @@ class SmartFinancialPDFParser:
 
     @staticmethod
     def detect_statement_type(page_text: str) -> str:
-        t = (page_text or "").lower()
-        if any(k in t for k in ("bảng cân đối kế toán", "cân đối kế toán", "balance sheet", "tổng cộng tài sản", "tổng cộng nguồn vốn")):
+        t = normalize_vn_text(page_text).lower()
+        if any(k in t for k in ("bảng cân đối kế toán", "cân đối kế toán", "tình hình tài chính", "balance sheet", "tổng cộng tài sản", "tổng cộng nguồn vốn")):
             return "balance_sheet"
         if any(k in t for k in ("kết quả hoạt động kinh doanh", "báo cáo kết quả", "income statement", "lợi nhuận gộp", "doanh thu thuần")):
             return "income_statement"
@@ -901,44 +1059,56 @@ class SmartFinancialPDFParser:
         period: str,
         strict_identity_check: bool = True,
     ) -> Dict[str, Any]:
-        """
-        Xử lý danh sách trang PDF (mỗi trang gồm `page`, `text`, `tables`, `image`).
-        Tự động kích hoạt VLM OCR cho trang scan và tự động sửa lỗi (Self-Correction)
-        nếu `VASAccountingQualityGate` phát hiện lệch đẳng thức kế toán.
-        """
-        combined_early_text = "\n".join(str(p.get("text", "")) for p in pages_data[:3])
+        combined_early_text = normalize_vn_text("\n".join(str(p.get("text", "")) for p in pages_data[:3]))
         is_identity_ok, identity_msg = self.verify_document_identity(combined_early_text, company, period)
         if strict_identity_check and not is_identity_ok:
             raise ValueError(identity_msg)
 
+        doc_scope = ReportScopeDetector.detect_scope(combined_early_text)
         chunks: List[DocumentChunk] = []
         facts: List[FinancialFact] = []
         scanned_pages_trigger: List[Dict[str, Any]] = []
 
         for page_obj in pages_data:
             page_num = int(page_obj.get("page", 1))
-            raw_text = str(page_obj.get("text", "") or "").strip()
+            raw_text = normalize_vn_text(str(page_obj.get("text", "") or "")).strip()
             raw_tables = page_obj.get("tables", []) or []
             page_image = page_obj.get("image", None)
 
-            is_scanned_page = len(raw_text) < 40 and not raw_tables
+            # Trang được coi là scan nếu rất ít chữ (< 40 ký tự) HOẶC có ảnh trang nhưng hoàn toàn không bóc được bảng nào
+            is_scanned_page = (len(raw_text) < 40 and not raw_tables) or (
+                page_image is not None and not raw_tables and self.detect_statement_type(raw_text) != "notes"
+            )
             stmt_type = self.detect_statement_type(raw_text)
+            page_scope = ReportScopeDetector.detect_scope(raw_text) if raw_text else doc_scope
 
             if is_scanned_page:
                 scanned_pages_trigger.append(page_obj)
-                ocr_rows = self.vlm_backbone.extract_table_rows_from_image(
-                    image_input=page_image or f"scanned_page_{page_num}",
-                    statement_hint=stmt_type,
+                img_target = page_image or f"scanned_page_{page_num}"
+                cache_key = (
+                    self.ocr_cache.compute_hash(img_target)
+                    if self.ocr_cache is not None and self.vlm_backbone.mock_vlm_callable is None
+                    else None
                 )
+                ocr_rows = self.ocr_cache.get_cached_rows(cache_key) if (self.ocr_cache and cache_key) else None
+                if ocr_rows is None:
+                    ocr_rows = self.vlm_backbone.extract_table_rows_from_image(
+                        image_input=img_target,
+                        statement_hint=stmt_type,
+                    )
+                    if ocr_rows and self.ocr_cache is not None and cache_key is not None:
+                        self.ocr_cache.save_cached_rows(cache_key, ocr_rows, statement_hint=stmt_type)
+
                 if ocr_rows:
                     joined_ocr_text = "\n".join(" | ".join(r) for r in ocr_rows)
-                    inferred_stmt = self.detect_statement_type(joined_ocr_text)
+                    inferred_stmt = self.detect_statement_type(f"{raw_text}\n{joined_ocr_text}")
                     page_facts = self.fact_extractor.extract_from_table_rows(
                         ocr_rows,
                         company=company,
                         period=period,
                         statement_type=inferred_stmt,
                         page=page_num,
+                        report_scope=page_scope,
                         extraction_method="qwen_vl_ocr",
                     )
                     facts.extend(page_facts)
@@ -951,7 +1121,7 @@ class SmartFinancialPDFParser:
                             chunk_type="table",
                             statement_type=inferred_stmt,
                             page=page_num,
-                            metadata={"extraction_method": "qwen_vl_ocr"},
+                            metadata={"extraction_method": "qwen_vl_ocr", "report_scope": page_scope},
                         )
                     )
                 continue
@@ -966,12 +1136,12 @@ class SmartFinancialPDFParser:
                         chunk_type="text",
                         statement_type=stmt_type,
                         page=page_num,
-                        metadata={"extraction_method": "digital_text"},
+                        metadata={"extraction_method": "digital_text", "report_scope": page_scope},
                     )
                 )
 
             for t_idx, table in enumerate(raw_tables):
-                table_text = "\n".join(" | ".join(str(c) for c in r) for r in table)
+                table_text = "\n".join(" | ".join(normalize_vn_text(str(c)) for c in r if c is not None) for r in table)
                 t_stmt = self.detect_statement_type(f"{raw_text}\n{table_text}")
                 table_facts = self.fact_extractor.extract_from_table_rows(
                     table,
@@ -979,6 +1149,7 @@ class SmartFinancialPDFParser:
                     period=period,
                     statement_type=t_stmt,
                     page=page_num,
+                    report_scope=page_scope,
                     extraction_method="docling_table",
                 )
                 facts.extend(table_facts)
@@ -991,11 +1162,10 @@ class SmartFinancialPDFParser:
                         chunk_type="table",
                         statement_type=t_stmt,
                         page=page_num,
-                        metadata={"extraction_method": "docling_table"},
+                        metadata={"extraction_method": "docling_table", "report_scope": page_scope},
                     )
                 )
 
-        # Bước Kiểm toán đầu vào (Accounting Quality Gate) & Self-Correction Loop
         quality_report = self.quality_gate.evaluate(company=company, period=period, facts=facts)
         if quality_report.failed_checks > 0 and scanned_pages_trigger:
             failed_checks = [c for c in quality_report.checks if c.status == "fail"]
@@ -1017,6 +1187,7 @@ class SmartFinancialPDFParser:
                         period=period,
                         statement_type=inferred_stmt,
                         page=page_num,
+                        report_scope=doc_scope,
                         extraction_method="qwen_vl_self_corrected",
                     )
                     if retry_facts:
@@ -1040,6 +1211,7 @@ class SmartFinancialPDFParser:
         return {
             "company": company.upper(),
             "period": period,
+            "report_scope": doc_scope,
             "chunks": chunks,
             "facts": facts,
             "quality_report": quality_report,
@@ -1052,10 +1224,6 @@ class SmartFinancialPDFParser:
         facts: Sequence[FinancialFact],
         quality_report: Optional[QualityReport] = None,
     ) -> Dict[str, Any]:
-        """
-        VÁ LỖI #2 TRONG REVIEW_20261020.md:
-        Không bao giờ trả về `is_valid=True` khi không trích xuất được bất kỳ chunk hay fact nào.
-        """
         has_content = len(chunks) > 0 or len(facts) > 0
         accounting_ok = True if quality_report is None else (quality_report.overall_status != "fail")
         is_valid = bool(has_content and accounting_ok)
@@ -1068,19 +1236,13 @@ class SmartFinancialPDFParser:
 
 
 # ==============================================================================
-# 6. SQLITE STORE + FTS5 (Vá lỗi #4 từ `REVIEW_20261020.md`)
+# 7. SQLITE STORE + FTS5 (Vá lỗi #4 từ `REVIEW_20261020.md`)
 # ==============================================================================
 
 class UnifiedSQLiteStore:
     """
     Lưu trữ cấu trúc `FinancialFact`, `DocumentChunk` (kèm FTS5 full-text search)
     và `QualityReport`.
-    ĐÃ VÁ LỖI #4 TRONG REVIEW_20261020.md:
-    - Khi truy vấn `query_fact` không tìm thấy đúng `period` được yêu cầu và được phép
-      fallback (`allow_period_fallback=True`), câu truy vấn SQL luôn sắp xếp
-      `ORDER BY period DESC LIMIT 1` để lấy kỳ báo cáo mới nhất một cách tất định,
-      đồng thời đánh dấu cờ `is_fallback_period=True` và trả về rõ `actual_period`
-      để tầng trả lời nói rõ kỳ thực tế cho người dùng.
     """
 
     def __init__(self, db_path: Union[str, Path] = ":memory:") -> None:
@@ -1166,7 +1328,7 @@ class UnifiedSQLiteStore:
                     f.company.upper(),
                     f.period,
                     f.metric_code,
-                    f.metric_name,
+                    normalize_vn_text(f.metric_name),
                     f.vas_code,
                     f.statement_type,
                     f.report_scope,
@@ -1174,7 +1336,7 @@ class UnifiedSQLiteStore:
                     f.unit,
                     int(f.page),
                     json.dumps(f.bbox) if f.bbox else None,
-                    f.raw_text,
+                    normalize_vn_text(f.raw_text),
                     f.extraction_method,
                 ),
             )
@@ -1186,6 +1348,7 @@ class UnifiedSQLiteStore:
         count = 0
         cur = self.conn.cursor()
         for c in chunks:
+            norm_content = normalize_vn_text(c.content)
             cur.execute(
                 """
                 INSERT OR REPLACE INTO chunks (
@@ -1199,14 +1362,14 @@ class UnifiedSQLiteStore:
                     c.chunk_type,
                     c.statement_type,
                     int(c.page),
-                    c.content,
+                    norm_content,
                     json.dumps(c.metadata, ensure_ascii=False),
                 ),
             )
             cur.execute("DELETE FROM chunks_fts WHERE chunk_id = ?", (c.chunk_id,))
             cur.execute(
                 "INSERT INTO chunks_fts (chunk_id, company, period, content) VALUES (?, ?, ?, ?)",
-                (c.chunk_id, c.company.upper(), c.period, c.content),
+                (c.chunk_id, c.company.upper(), c.period, norm_content),
             )
             count += 1
         self.conn.commit()
@@ -1266,7 +1429,7 @@ class UnifiedSQLiteStore:
                 """
                 SELECT * FROM facts
                 WHERE company = ? AND (metric_code = ? OR vas_code = ?) AND period = ?
-                ORDER BY id DESC LIMIT 1
+                ORDER BY CASE WHEN report_scope = 'consolidated' THEN 0 ELSE 1 END, id DESC LIMIT 1
                 """,
                 (comp, metric_code, metric_code, period),
             ).fetchone()
@@ -1284,7 +1447,7 @@ class UnifiedSQLiteStore:
             """
             SELECT * FROM facts
             WHERE company = ? AND (metric_code = ? OR vas_code = ?)
-            ORDER BY period DESC, id DESC LIMIT 1
+            ORDER BY period DESC, CASE WHEN report_scope = 'consolidated' THEN 0 ELSE 1 END, id DESC LIMIT 1
             """,
             (comp, metric_code, metric_code),
         ).fetchone()
@@ -1312,7 +1475,8 @@ class UnifiedSQLiteStore:
         period: Optional[str] = None,
         top_k: int = 10,
     ) -> List[Dict[str, Any]]:
-        tokens = [t for t in re.findall(r"\w+", query.lower()) if len(t) > 1]
+        norm_q = normalize_vn_text(query).lower()
+        tokens = [t for t in re.findall(r"\w+", norm_q) if len(t) > 1]
         if not tokens:
             return []
 
@@ -1344,14 +1508,13 @@ class UnifiedSQLiteStore:
 
 
 # ==============================================================================
-# 7. DETERMINISTIC FINANCIAL CALCULATOR (Từ `src/multimodal_rag/calculator.py`)
+# 8. DETERMINISTIC FINANCIAL CALCULATOR (Từ `src/multimodal_rag/calculator.py`)
 # ==============================================================================
 
 class DeterministicFinancialCalculator:
     """
     Thực hiện mọi phép tính tài chính (YoY growth, ROE, ROA, Gross Margin, Net Margin,
     Current Ratio, Debt-to-Equity) bằng `Decimal` độ chính xác cao.
-    Tuyệt đối không để LLM tự thực hiện phép tính số học.
     """
 
     @staticmethod
@@ -1410,17 +1573,10 @@ class DeterministicFinancialCalculator:
 
 
 # ==============================================================================
-# 8. HYBRID RETRIEVER (`BAAI/bge-m3` + FTS5 + `BAAI/bge-reranker-v2-m3`)
+# 9. HYBRID RETRIEVER (`BAAI/bge-m3` + FTS5 + `BAAI/bge-reranker-v2-m3`)
 # ==============================================================================
 
 class HybridFinancialRetriever:
-    """
-    Kết hợp truy xuất ngữ nghĩa Dense (`BAAI/bge-m3` + FAISS/Cosine) với truy xuất từ khóa
-    (`SQLite FTS5` / Sparse lexical) qua Reciprocal Rank Fusion (RRF), sau đó chấm điểm
-    lại bằng Cross-Encoder `BAAI/bge-reranker-v2-m3`.
-    Có cơ chế fallback sang TF-IDF n-gram nhẹ khi chạy kiểm thử CPU không có GPU.
-    """
-
     EMBEDDING_MODEL_ID = "BAAI/bge-m3"
     RERANKER_MODEL_ID = "BAAI/bge-reranker-v2-m3"
 
@@ -1446,11 +1602,12 @@ class HybridFinancialRetriever:
         period: Optional[str] = None,
         top_k: int = 5,
     ) -> List[Dict[str, Any]]:
+        norm_q = normalize_vn_text(query)
         lexical_hits = self.store.search_chunks_lexical(
-            query=query, company=company, period=period, top_k=top_k * 3
+            query=norm_q, company=company, period=period, top_k=top_k * 3
         )
         semantic_hits = self._semantic_search(
-            query=query, company=company, period=period, top_k=top_k * 3
+            query=norm_q, company=company, period=period, top_k=top_k * 3
         )
 
         rrf_scores: Dict[str, float] = {}
@@ -1474,7 +1631,7 @@ class HybridFinancialRetriever:
             entry["hybrid_score"] = round(score, 6)
             candidates.append(entry)
 
-        return self._rerank(query=query, candidates=candidates, top_k=top_k)
+        return self._rerank(query=norm_q, candidates=candidates, top_k=top_k)
 
     def _semantic_search(
         self,
@@ -1522,26 +1679,17 @@ class HybridFinancialRetriever:
 
     @staticmethod
     def _char_ngrams(text: str, n: int = 3) -> set[str]:
-        norm = re.sub(r"\s+", " ", (text or "").lower().strip())
+        norm = re.sub(r"\s+", " ", normalize_vn_text(text).lower().strip())
         if len(norm) < n:
             return {norm} if norm else set()
         return {norm[i : i + n] for i in range(len(norm) - n + 1)}
 
 
 # ==============================================================================
-# 9. NUMERICAL VERIFIER (Vá lỗi #6 từ `REVIEW_20261020.md`)
+# 10. NUMERICAL VERIFIER (Vá lỗi #6 từ `REVIEW_20261020.md`)
 # ==============================================================================
 
 class NumericalVerifier:
-    """
-    Kiểm duyệt toàn bộ các con số xuất hiện trong câu trả lời của LLM so với tập dữ liệu gốc.
-    ĐÃ VÁ LỖI #6 TRONG REVIEW_20261020.md:
-    - Bản cũ dùng điều kiện `if abs(val) > 10:` khiến mọi con số <= 10 (như tăng trưởng 6.5%,
-      biên lợi nhuận ròng 8.2%, hệ số thanh toán 1.45 lần, EPS 3.200đ) bị bỏ qua không kiểm duyệt.
-    - Bản mới trích xuất và kiểm chứng MỌI con số tài chính (kể cả số âm, số thập phân nhỏ `<= 10`,
-      tỷ lệ phần trăm), chỉ loại trừ các số thứ tự ngày/tháng/trang/mã số VAS đã biết.
-    """
-
     def __init__(self, rel_tolerance: float = 0.015) -> None:
         self.rel_tolerance = rel_tolerance
 
@@ -1551,7 +1699,7 @@ class NumericalVerifier:
             return []
         ignored = {round(float(x), 4) for x in (ignore_numbers or [])}
 
-        cleaned = re.sub(r"\b(?:FY|Q[1-4]/?|năm|kỳ|trang|page|mã\s+số|mã)\s*\d{1,4}\b", " ", text, flags=re.I)
+        cleaned = re.sub(r"\b(?:FY|Q[1-4]/?|năm|kỳ|trang|page|mã\s+số|mã)\s*\d{1,4}\b", " ", normalize_vn_text(text), flags=re.I)
         cleaned = re.sub(r"\b20\d{2}\b", " ", cleaned)
 
         matches = re.findall(r"\(?-?\d+(?:[.,]\d+)*\)?%?", cleaned)
@@ -1614,16 +1762,12 @@ class NumericalVerifier:
 
 
 # ==============================================================================
-# 10. END-TO-END UNIFIED PIPELINE & REAL PDF FILE INGESTOR (Đã bổ sung đọc file .PDF thực tế)
+# 11. END-TO-END UNIFIED PIPELINE & REAL PDF FILE INGESTOR
 # ==============================================================================
 
 class UnifiedFinancialRAGPipeline:
     """
-    Pipeline hợp nhất hoàn chỉnh nối khép kín:
-    `RealPDFFileReader` (`pdfplumber` / `pypdfium2` / `pypdf` + `Qwen2.5-VL` OCR cho trang scan)
-    -> `SmartFinancialPDFParser` -> `VASAccountingQualityGate` -> `UnifiedSQLiteStore`
-    -> `QueryRouter` -> (`DeterministicFinancialCalculator` + `HybridFinancialRetriever`)
-    -> `SharedQwenVLBackbone` -> `NumericalVerifier`.
+    Pipeline hợp nhất hoàn chỉnh nối khép kín từ đọc file `.pdf` vật lý đến kiểm toán VAS và trả lời RAG.
     """
 
     def __init__(
@@ -1636,13 +1780,14 @@ class UnifiedFinancialRAGPipeline:
         self.fact_extractor = FactExtractor(self.registry)
         self.quality_gate = VASAccountingQualityGate()
         self.vlm_backbone = vlm_backbone or SharedQwenVLBackbone(lazy_load=True)
+        self.store = UnifiedSQLiteStore(db_path=db_path)
+        self.ocr_cache = PageOCRCacheManager(self.store.conn)
         self.pdf_parser = SmartFinancialPDFParser(
             fact_extractor=self.fact_extractor,
             vlm_backbone=self.vlm_backbone,
             quality_gate=self.quality_gate,
+            ocr_cache=self.ocr_cache,
         )
-        self.store = UnifiedSQLiteStore(db_path=db_path)
-        self.ocr_cache = PageOCRCacheManager(self.store.conn)
         self.retriever = HybridFinancialRetriever(store=self.store)
         self.calculator = DeterministicFinancialCalculator()
         self.verifier = NumericalVerifier()
@@ -1651,7 +1796,6 @@ class UnifiedFinancialRAGPipeline:
             self.seed_default_fpt_data()
 
     def get_database_summary(self) -> Dict[str, Any]:
-        """Trả về thống kê các báo cáo đã nạp trong SQLite để hiển thị trên giao diện Gradio."""
         cur = self.store.conn.cursor()
         fact_count = cur.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
         chunk_count = cur.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
@@ -1781,6 +1925,38 @@ class UnifiedFinancialRAGPipeline:
         self.ingest_pages(fpt_2023_pages, company="FPT", period="FY2023", strict_identity_check=False)
         self.ingest_pages(fpt_2024_pages, company="FPT", period="FY2024", strict_identity_check=False)
 
+    def infer_company_and_period(
+        self,
+        file_path: Union[str, Path],
+        first_pages_text: str = "",
+        default_company: str = "FPT",
+        default_period: str = "FY2024",
+    ) -> Tuple[str, str]:
+        """
+        Tự động nhận diện Mã Doanh nghiệp và Kỳ báo cáo từ tên file kết hợp với nội dung 3 trang đầu.
+        """
+        stem = Path(file_path).stem.upper()
+        comp_match = re.match(r"^([A-Z]{3,5})(?:[_\-\s]|$)", stem)
+        detected_from_text = self.pdf_parser.detect_company_from_text(first_pages_text) if first_pages_text else None
+
+        if comp_match and comp_match.group(1) not in {"BCTC", "BAO", "REPORT", "SCAN", "FILE", "TEST"}:
+            company = comp_match.group(1)
+        elif detected_from_text:
+            company = detected_from_text
+        else:
+            company = default_company.upper()
+
+        q_match = re.search(r"(Q[1-4][_\-\s]*20\d{2}|20\d{2}[_\-\s]*Q[1-4])", stem)
+        y_match = re.search(r"(20\d{2})", stem)
+        if q_match:
+            period = re.sub(r"[\s_\-]+", "_", q_match.group(1))
+        elif y_match:
+            period = f"FY{y_match.group(1)}"
+        else:
+            text_years = sorted(set(re.findall(r"\b(20\d{2})\b", first_pages_text or "")))
+            period = f"FY{max(text_years)}" if text_years else default_period
+        return company, period
+
     @staticmethod
     def infer_company_and_period_from_filename(
         file_path: Union[str, Path],
@@ -1788,7 +1964,7 @@ class UnifiedFinancialRAGPipeline:
         default_period: str = "FY2024",
     ) -> Tuple[str, str]:
         stem = Path(file_path).stem.upper()
-        comp_match = re.match(r"^([A-Z]{3,5})[_\-\s]", stem)
+        comp_match = re.match(r"^([A-Z]{3,5})(?:[_\-\s]|$)", stem)
         company = comp_match.group(1) if comp_match else default_company.upper()
 
         q_match = re.search(r"(Q[1-4][_\-\s]*20\d{2}|20\d{2}[_\-\s]*Q[1-4])", stem)
@@ -1806,13 +1982,6 @@ class UnifiedFinancialRAGPipeline:
         pdf_path: Union[str, Path],
         max_pages: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Đọc file `.pdf` vật lý từ đĩa hoặc từ Gradio File Upload:
-        1. Thử đọc text và bảng bằng `pdfplumber` (chuẩn nhất cho PDF có text layer).
-        2. Fallback sang `pypdf` hoặc `pypdfium2` nếu môi trường thiếu `pdfplumber`.
-        3. Với các trang scan (`len(text.strip()) < 40` và không có bảng), tự động render
-           trang PDF thành ảnh `PIL.Image` (200 DPI) qua `pypdfium2` để đưa vào `Qwen2.5-VL`.
-        """
         path_obj = Path(pdf_path)
         if not path_obj.exists():
             raise FileNotFoundError(f"Không tìm thấy file PDF tại đường dẫn: {path_obj}")
@@ -1834,14 +2003,14 @@ class UnifiedFinancialRAGPipeline:
                 limit = min(total_p, max_pages) if max_pages else total_p
                 for idx in range(limit):
                     p = pdf.pages[idx]
-                    txt = (p.extract_text() or "").strip()
+                    txt = normalize_vn_text(p.extract_text() or "").strip()
                     raw_tables = p.extract_tables() or []
                     cleaned_tables = []
                     for tbl in raw_tables:
                         if not tbl:
                             continue
                         cleaned_rows = [
-                            [str(cell).strip() if cell is not None else "" for cell in row]
+                            [normalize_vn_text(str(cell)).strip() if cell is not None else "" for cell in row]
                             for row in tbl
                             if row and any(c is not None and str(c).strip() for c in row)
                         ]
@@ -1854,7 +2023,7 @@ class UnifiedFinancialRAGPipeline:
                             cleaned_tables.append(heuristic_rows)
 
                     page_image = None
-                    if len(txt) < 40 and not cleaned_tables and pdfium_doc is not None and idx < len(pdfium_doc):
+                    if not cleaned_tables and pdfium_doc is not None and idx < len(pdfium_doc):
                         try:
                             bitmap = pdfium_doc[idx].render(scale=2.0)
                             page_image = bitmap.to_pil()
@@ -1879,12 +2048,12 @@ class UnifiedFinancialRAGPipeline:
         total_p = len(reader.pages)
         limit = min(total_p, max_pages) if max_pages else total_p
         for idx in range(limit):
-            txt = (reader.pages[idx].extract_text() or "").strip()
+            txt = normalize_vn_text(reader.pages[idx].extract_text() or "").strip()
             heuristic_rows = self._extract_vas_rows_from_plain_text(txt) if txt else []
             cleaned_tables = [heuristic_rows] if heuristic_rows else []
 
             page_image = None
-            if len(txt) < 40 and not cleaned_tables and pdfium_doc is not None and idx < len(pdfium_doc):
+            if not cleaned_tables and pdfium_doc is not None and idx < len(pdfium_doc):
                 try:
                     bitmap = pdfium_doc[idx].render(scale=2.0)
                     page_image = bitmap.to_pil()
@@ -1901,19 +2070,32 @@ class UnifiedFinancialRAGPipeline:
             )
         return pages_data
 
-    @staticmethod
-    def _extract_vas_rows_from_plain_text(page_text: str) -> List[List[str]]:
+    def _extract_vas_rows_from_plain_text(self, page_text: str) -> List[List[str]]:
+        """
+        Bóc tách các dòng chỉ tiêu BCTC từ văn bản phẳng (wireless table):
+        - Hỗ trợ cả dòng có Mã số VAS (`Chỉ tiêu   110   V.01   9.315.000   8.279.000`)
+        - Lẫn dòng bảng tóm tắt không có cột Mã số VAS (`Tổng cộng tài sản   72.000   60.283`).
+        """
         rows: List[List[str]] = []
-        pattern = re.compile(
-            r"^(?P<label>[^\d\n][^\n]{3,95}?)\s+(?P<code>\d{2,3})\s+"
-            r"(?:(?P<note>[IVX]+\.\d+|TM\.?\d+|\d{1,2}\.\d{1,2})\s+)?"
+        pattern_with_code = re.compile(
+            r"^(?P<label>[^\d\n][^\n]{2,95}?)\s+(?P<code>\d{2,3})\s+"
+            r"(?:(?P<note>[IVX]+\.\d+[a-z]?|TM\.?\d+|\d{1,2}\.\d{1,2})\s+)?"
             r"(?P<curr>\(?-?\d[\d.,]*\)?)"
             r"(?:\s+(?P<prev>\(?-?\d[\d.,]*\)?))?\s*$",
             re.IGNORECASE,
         )
-        for raw_line in page_text.splitlines():
+        pattern_without_code = re.compile(
+            r"^(?P<label>[^\d\n][^\n]{3,95}?)\s+"
+            r"(?P<curr>\(?-?\d[\d.,]{2,}\)?)"
+            r"(?:\s+(?P<prev>\(?-?\d[\d.,]{2,}\)?))?\s*$",
+            re.IGNORECASE,
+        )
+
+        for raw_line in normalize_vn_text(page_text).splitlines():
             line = re.sub(r"^\s*(?:[IVX]+|[A-Z]|\d+)\.\s*", "", raw_line.strip())
-            m = pattern.match(line)
+            if not line:
+                continue
+            m = pattern_with_code.match(line)
             if m:
                 rows.append(
                     [
@@ -1924,6 +2106,22 @@ class UnifiedFinancialRAGPipeline:
                         (m.group("prev") or "").strip(),
                     ]
                 )
+                continue
+
+            m2 = pattern_without_code.match(line)
+            if m2:
+                candidate_label = m2.group("label").strip()
+                spec = self.registry.match(candidate_label)
+                if spec is not None:
+                    rows.append(
+                        [
+                            candidate_label,
+                            spec.vas_code.replace("_CF", ""),
+                            "",
+                            m2.group("curr").strip(),
+                            (m2.group("prev") or "").strip(),
+                        ]
+                    )
         return rows
 
     def ingest_pdf_file(
@@ -1934,15 +2132,13 @@ class UnifiedFinancialRAGPipeline:
         strict_identity_check: bool = False,
         max_pages: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """
-        Nạp trực tiếp một file `.pdf` vào hệ thống:
-        Đọc trang -> Bóc bảng & chữ (kèm VLM OCR cho trang scan) -> Kiểm toán VAS -> Lưu SQLite & Index.
-        """
-        inferred_comp, inferred_period = self.infer_company_and_period_from_filename(pdf_path)
+        pages_data = self.read_pdf_file_to_pages_data(pdf_path, max_pages=max_pages)
+        early_text = "\n".join(str(p.get("text", "")) for p in pages_data[:3])
+        inferred_comp, inferred_period = self.infer_company_and_period(pdf_path, first_pages_text=early_text)
+
         comp = (company or "").strip().upper() or inferred_comp
         per = (period or "").strip() or inferred_period
 
-        pages_data = self.read_pdf_file_to_pages_data(pdf_path, max_pages=max_pages)
         result = self.ingest_pages(
             pages_data=pages_data,
             company=comp,
@@ -1976,7 +2172,7 @@ class UnifiedFinancialRAGPipeline:
         return result
 
     def classify_intent(self, query: str) -> str:
-        q = query.lower()
+        q = normalize_vn_text(query).lower()
         if any(k in q for k in ("kiểm toán", "cân đối", "khớp", "reconcile", "reconciliation", "đẳng thức")):
             return "reconciliation"
         if any(k in q for k in ("tăng trưởng", "so với", "yoy", "thay đổi", "biến động")):
@@ -1992,7 +2188,7 @@ class UnifiedFinancialRAGPipeline:
         period: str,
         comparison_period: Optional[str] = None,
     ) -> Dict[str, Any]:
-        q_clean = (query or "").strip()
+        q_clean = normalize_vn_text(query).strip()
         if not q_clean:
             return {
                 "intent": "empty_query",
@@ -2143,7 +2339,7 @@ class UnifiedFinancialRAGPipeline:
         }
 
     def _handle_ratio_query(self, query: str, company: str, period: str) -> Dict[str, Any]:
-        q = query.lower()
+        q = normalize_vn_text(query).lower()
         if "biên lợi nhuận gộp" in q or "gross margin" in q:
             num_fact = self.store.query_fact(company, "gross_profit", period, allow_period_fallback=True)
             den_fact = self.store.query_fact(company, "net_revenue", period, allow_period_fallback=True)
@@ -2190,13 +2386,14 @@ class UnifiedFinancialRAGPipeline:
 
 
 # ==============================================================================
-# 11. GRADIO UI INTEGRATION FOR GOOGLE COLAB T4 (Có khung Upload PDF + Dữ liệu mẫu sẵn)
+# 12. GRADIO UI INTEGRATION FOR GOOGLE COLAB T4 (Có Upload PDF + Auto Sync)
 # ==============================================================================
 
 def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
     """
     Giao diện Gradio đầy đủ gồm 2 phần:
-    1. Tải trực tiếp file PDF Báo cáo tài chính (.pdf) lên hệ thống + Xem trạng thái dữ liệu đã nạp.
+    1. Tải trực tiếp file PDF Báo cáo tài chính (.pdf) lên hệ thống + Tự động nhận diện
+       Mã Doanh nghiệp & Kỳ báo cáo từ tên file/nội dung và đồng bộ xuống ô truy vấn.
     2. Đặt câu hỏi phân tích tài chính, tính tỷ số YoY/ROE/ROA và kiểm toán cân đối BCTC.
     Nếu cơ sở dữ liệu đang trống khi mở Gradio, tự động nạp sẵn bộ dữ liệu mẫu FPT (FY2023 & FY2024).
     """
@@ -2222,15 +2419,32 @@ def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
         uploaded_files: Any,
         company_override: str,
         period_override: str,
-    ) -> Tuple[str, str]:
+        current_query_company: str,
+        current_query_period: str,
+    ) -> Tuple[str, str, str, str]:
         if not uploaded_files:
-            return "Vui lòng chọn ít nhất 1 file PDF Báo cáo tài chính để nạp.", format_db_status()
+            return (
+                "Vui lòng chọn ít nhất 1 file PDF Báo cáo tài chính để nạp.",
+                format_db_status(),
+                current_query_company,
+                current_query_period,
+            )
 
         file_list = uploaded_files if isinstance(uploaded_files, list) else [uploaded_files]
         logs: List[str] = []
+        last_comp = current_query_company
+        last_per = current_query_period
 
         for f_obj in file_list:
-            f_path = f_obj.name if hasattr(f_obj, "name") else str(f_obj)
+            if isinstance(f_obj, (str, Path)):
+                f_path = str(f_obj)
+            elif isinstance(f_obj, dict) and "name" in f_obj:
+                f_path = str(f_obj["name"])
+            elif hasattr(f_obj, "name"):
+                f_path = str(f_obj.name)
+            else:
+                f_path = str(f_obj)
+
             try:
                 res = pipeline.ingest_pdf_file(
                     pdf_path=f_path,
@@ -2238,6 +2452,8 @@ def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
                     period=period_override.strip() or None,
                     strict_identity_check=False,
                 )
+                last_comp = res["company"]
+                last_per = res["period"]
                 q_rep = res["quality_report"]
                 logs.append(
                     f"[THÀNH CÔNG] File '{res['file_name']}' -> Công ty: {res['company']} | Kỳ: {res['period']} | "
@@ -2248,7 +2464,7 @@ def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
             except Exception as exc:
                 logs.append(f"[LỖI] Không thể nạp file '{Path(f_path).name}': {exc}")
 
-        return "\n".join(logs), format_db_status()
+        return "\n".join(logs), format_db_status(), last_comp, last_per
 
     def handle_qa(query: str, company: str, period: str, comparison_period: str) -> Tuple[str, str, str]:
         comp_period = comparison_period.strip() or None
@@ -2289,14 +2505,14 @@ def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
                 )
                 with gr.Column():
                     upload_company = gr.Textbox(
-                        label="Mã Doanh nghiệp cho file tải lên (Để trống sẽ tự nhận diện từ tên file)",
-                        placeholder="Ví dụ: FPT, VNM, HPG...",
-                        value="FPT",
+                        label="Mã Doanh nghiệp cho file tải lên (Để trống sẽ tự nhận diện từ tên file / nội dung PDF)",
+                        placeholder="Để trống để tự động nhận diện (hoặc nhập FPT, VNM, HPG...)",
+                        value="",
                     )
                     upload_period = gr.Textbox(
-                        label="Kỳ Báo cáo cho file tải lên (Để trống sẽ tự nhận diện từ tên file)",
-                        placeholder="Ví dụ: FY2024, Q4_2024...",
-                        value="FY2024",
+                        label="Kỳ Báo cáo cho file tải lên (Để trống sẽ tự nhận diện từ tên file / nội dung PDF)",
+                        placeholder="Để trống để tự động nhận diện (hoặc nhập FY2024, Q4_2024...)",
+                        value="",
                     )
                     ingest_btn = gr.Button("📥 Nạp & Kiểm toán File PDF vào Hệ thống", variant="secondary")
             ingest_log_out = gr.Textbox(label="Kết quả bóc tách & Kiểm toán đầu vào (VAS Quality Gate)", lines=2)
@@ -2333,8 +2549,8 @@ def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
 
         ingest_btn.click(
             fn=handle_pdf_upload,
-            inputs=[pdf_input, upload_company, upload_period],
-            outputs=[ingest_log_out, db_status_box],
+            inputs=[pdf_input, upload_company, upload_period, company_in, period_in],
+            outputs=[ingest_log_out, db_status_box, company_in, period_in],
         )
         submit_btn.click(
             fn=handle_qa,
@@ -2342,142 +2558,3 @@ def create_colab_gradio_interface(pipeline: UnifiedFinancialRAGPipeline):
             outputs=[answer_out, verifier_out, meta_out],
         )
     return demo
-
-
-# ==============================================================================
-# 12. CÁC NÂNG CẤP NÂNG CAO (UPGRADES V2 CHO BCTC VIỆT NAM & COLAB T4)
-# ==============================================================================
-
-import hashlib
-
-
-class UnitScaleNormalizer:
-    """
-    NÂNG CẤP #1: Tự động phát hiện và chuẩn hóa Đơn vị tiền tệ trên đầu trang BCTC
-    ("Đơn vị tính: Triệu đồng", "Tỷ đồng", "Nghìn đồng", "VND", "Million USD").
-    Ngăn chặn triệt để lỗi lệch quy mô 10^3 - 10^9 lần khi tính YoY hoặc ghép bảng.
-    """
-
-    UNIT_PATTERNS: Tuple[Tuple[str, str, float], ...] = (
-        (r"đơn\s*vị\s*tính\s*[:\-]?\s*tỷ\s*(?:đồng|vnd|vnđ)", "VND", 1_000_000_000.0),
-        (r"đơn\s*vị\s*tính\s*[:\-]?\s*triệu\s*(?:đồng|vnd|vnđ)", "VND", 1_000_000.0),
-        (r"đơn\s*vị\s*tính\s*[:\-]?\s*(?:nghìn|ngàn)\s*(?:đồng|vnd|vnđ)", "VND", 1_000.0),
-        (r"đơn\s*vị\s*tính\s*[:\-]?\s*(?:đồng|vnd|vnđ)", "VND", 1.0),
-        (r"\(\s*in\s+millions?\s*(?:of\s+usd|\$)?\s*\)", "USD", 1_000_000.0),
-        (r"\(\s*in\s+thousands?\s*(?:of\s+usd|\$)?\s*\)", "USD", 1_000.0),
-    )
-
-    @classmethod
-    def detect_unit_and_multiplier(cls, page_text: str, default_unit: str = "VND") -> Tuple[str, float]:
-        norm = (page_text or "").lower()
-        for pattern, base_unit, multiplier in cls.UNIT_PATTERNS:
-            if re.search(pattern, norm, flags=re.I):
-                return base_unit, multiplier
-        return default_unit, 1.0
-
-    @classmethod
-    def normalize_facts(cls, facts: Sequence[FinancialFact], page_text: str) -> List[FinancialFact]:
-        base_unit, multiplier = cls.detect_unit_and_multiplier(page_text)
-        if multiplier == 1.0:
-            return list(facts)
-        normalized: List[FinancialFact] = []
-        for f in facts:
-            scaled_val = float(Decimal(str(f.value)) * Decimal(str(multiplier)))
-            normalized.append(
-                FinancialFact(
-                    company=f.company,
-                    period=f.period,
-                    metric_code=f.metric_code,
-                    metric_name=f.metric_name,
-                    value=scaled_val,
-                    unit=base_unit,
-                    vas_code=f.vas_code,
-                    statement_type=f.statement_type,
-                    report_scope=f.report_scope,
-                    page=f.page,
-                    bbox=f.bbox,
-                    raw_text=f.raw_text,
-                    confidence=f.confidence,
-                    extraction_method=f.extraction_method,
-                )
-            )
-        return normalized
-
-
-class ReportScopeDetector:
-    """
-    NÂNG CẤP #2: Tự động phân biệt BCTC Hợp nhất (`consolidated`) và BCTC Riêng / Công ty mẹ (`separate`).
-    Tránh việc số liệu của Công ty mẹ ghi đè lên số liệu Hợp nhất trong cùng một kỳ báo cáo.
-    """
-
-    @staticmethod
-    def detect_scope(text: str) -> str:
-        t = (text or "").lower()
-        if any(k in t for k in ("báo cáo tài chính riêng", "bctc riêng", "công ty mẹ", "separate financial")):
-            return "separate"
-        return "consolidated"
-
-
-class PageOCRCacheManager:
-    """
-    NÂNG CẤP #3: Lưu bộ nhớ đệm (Persistent SQLite Cache) theo mã băm SHA-256 của trang scan.
-    Khi chạy trên Google Colab T4, nếu phiên làm việc bị ngắt kết nối hoặc chạy lại,
-    các trang BCTC scan đã qua Qwen2.5-VL sẽ được nạp tức thì trong 1ms mà không tốn GPU đọc lại.
-    """
-
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self.conn = conn
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS vlm_ocr_cache (
-                page_hash TEXT PRIMARY KEY,
-                statement_hint TEXT,
-                rows_json TEXT NOT NULL
-            )
-            """
-        )
-        self.conn.commit()
-
-    @staticmethod
-    def compute_hash(image_repr: Any, correction_hint: Optional[str] = None) -> str:
-        payload = f"{repr(image_repr)}||{correction_hint or ''}".encode("utf-8", errors="ignore")
-        return hashlib.sha256(payload).hexdigest()
-
-    def get_cached_rows(self, page_hash: str) -> Optional[List[List[str]]]:
-        row = self.conn.execute(
-            "SELECT rows_json FROM vlm_ocr_cache WHERE page_hash = ?", (page_hash,)
-        ).fetchone()
-        if not row:
-            return None
-        return json.loads(row[0])
-
-    def save_cached_rows(self, page_hash: str, rows: List[List[str]], statement_hint: str = "") -> None:
-        self.conn.execute(
-            "INSERT OR REPLACE INTO vlm_ocr_cache (page_hash, statement_hint, rows_json) VALUES (?, ?, ?)",
-            (page_hash, statement_hint, json.dumps(rows, ensure_ascii=False)),
-        )
-        self.conn.commit()
-
-
-class CrossPeriodAnomalyDetector:
-    """
-    NÂNG CẤP #4: Kiểm tra bất thường liên kỳ (Cross-Period Balance Sheet Continuity Check).
-    Đối chiếu "Số đầu năm" của kỳ năm nay (`T`) với "Số cuối năm" của kỳ năm trước (`T-1`),
-    hoặc "Tiền đầu kỳ (Mã 60 LCTT)" với "Tiền và tương đương tiền đầu kỳ trên BCĐKT (Mã 110)".
-    """
-
-    @staticmethod
-    def verify_cash_continuity(
-        ending_cash_prev: Union[float, Decimal],
-        beginning_cash_curr: Union[float, Decimal],
-        tolerance: float = 1.0,
-    ) -> Dict[str, Any]:
-        prev_dec = Decimal(str(ending_cash_prev))
-        curr_dec = Decimal(str(beginning_cash_curr))
-        diff = abs(curr_dec - prev_dec)
-        return {
-            "is_continuous": float(diff) <= tolerance,
-            "ending_cash_previous_period": float(prev_dec),
-            "beginning_cash_current_period": float(curr_dec),
-            "difference": float(diff),
-        }

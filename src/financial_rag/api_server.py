@@ -7,8 +7,11 @@ from pydantic import BaseModel
 from typing import Optional
 from .pipeline import UnifiedFinancialRAGPipeline
 
-app = FastAPI(title="Unified Financial Multimodal RAG API", version="2.0.0")
-pipeline = UnifiedFinancialRAGPipeline(db_path="financial_rag_unified.sqlite")
+app = FastAPI(title="Unified Financial Multimodal RAG API", version="2.1.0")
+pipeline = UnifiedFinancialRAGPipeline(
+    db_path="financial_rag_unified.sqlite",
+    seed_sample_data_if_empty=True,
+)
 
 
 class QueryRequest(BaseModel):
@@ -20,7 +23,11 @@ class QueryRequest(BaseModel):
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "backbone": pipeline.vlm_backbone.model_id}
+    return {
+        "status": "ok",
+        "backbone": pipeline.vlm_backbone.model_id,
+        "db_summary": pipeline.get_database_summary(),
+    }
 
 
 @app.post("/api/v1/ask")

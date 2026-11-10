@@ -1,33 +1,32 @@
 """
-Bộ Kiểm thử Tự động Toàn diện (Unit & Integration Tests) cho Unified Financial Multimodal RAG
-=============================================================================================
+Bộ Kiểm thử Tự động Toàn diện (12 Unit & Integration Tests) cho Unified Financial Multimodal RAG
+================================================================================================
 Hỗ trợ chạy bằng cả `pytest test_unified_pipeline.py` lẫn `python3 test_unified_pipeline.py`.
-Kiểm chứng toàn bộ các tính năng hợp nhất từ 2 nhánh và 8 lỗi trong `REVIEW_20261020.md`:
-1. [Bug #1 High] Phát hiện file PDF sai doanh nghiệp/kỳ báo cáo (`NVDA_10K_2024_sample.pdf` chứa Analog Devices 2009).
-2. [Bug #2 High] Xử lý trang PDF scan không có text layer qua `SharedQwenVLBackbone` + `validate_extraction` chuẩn.
-3. [Bug #3 High] Kết nối khép kín End-to-End Router + HybridRetriever + Deterministic Calculator + NumericalVerifier.
-4. [Bug #4 Medium] `UnifiedSQLiteStore.query_fact()` fallback có thứ tự `ORDER BY period DESC` kèm nhãn kỳ thực tế.
-5. [Bug #5 Medium] `FactExtractor.clean_number()` bảo toàn số âm `(1.234.567)` và `-1234.5` cũng như số `0`.
-6. [Bug #6 Medium] `NumericalVerifier.extract_numbers()` kiểm chứng cả các con số nhỏ `<= 10` (biên lợi nhuận, % tăng trưởng).
-7. [VAS Quality Gate] Kiểm tra chéo đẳng thức kế toán VAS (`270=100+200`, `440=300+400`, `20=10-11`, `50=20+30+40`)
-   và vòng lặp `Self-Correction` tự động đọc lại bảng khi lệch số liệu.
 """
 
 from __future__ import annotations
 
+import io
+from pathlib import Path
+import tempfile
+import unicodedata
 import unittest
+
 from unified_financial_rag_colab_t4 import (
     FactExtractor,
     FinancialFact,
     NumericalVerifier,
+    PageOCRCacheManager,
+    ReportScopeDetector,
     SharedQwenVLBackbone,
     SmartFinancialPDFParser,
     UnifiedFinancialRAGPipeline,
+    UnifiedSQLiteStore,
+    UnitScaleNormalizer,
 )
 
 
 def test_bug1_detect_mislabeled_nvda_analog_devices_pdf():
-    """Kiểm tra Bug #1: Chặn ngay file gắn nhãn NVDA FY2024 nhưng nội dung là Analog Devices 2009."""
     parser = SmartFinancialPDFParser()
     fake_nvda_pages = [
         {
@@ -49,18 +48,12 @@ def test_bug1_detect_mislabeled_nvda_analog_devices_pdf():
         raised = True
         error_msg = str(exc)
 
-    assert raised is True, "Phải ném ValueError khi nội dung PDF không khớp với nhãn công ty"
+    assert raised is True
     assert "NVDA" in error_msg
     assert "ADI" in error_msg
 
 
 def test_bug2_scanned_pdf_vlm_ocr_and_self_correction():
-    """
-    Kiểm tra Bug #2 & VAS Self-Correction:
-    - Khi trang PDF scan không có text layer, nếu VLM trả về rỗng thì `validate_extraction` phải báo `is_valid=False`.
-    - Khi VLM lần 1 đọc nhầm Mã 270 (Tổng tài sản = 350.000 thay vì 300.000 = 100.000 + 200.000),
-      `VASAccountingQualityGate` phát hiện lỗi và tự động gọi lại VLM với `correction_hint` để sửa thành 300.000.
-    """
     empty_parser = SmartFinancialPDFParser(
         vlm_backbone=SharedQwenVLBackbone(mock_vlm_callable=lambda prompt, img: "[]")
     )
@@ -109,10 +102,6 @@ def test_bug2_scanned_pdf_vlm_ocr_and_self_correction():
 
 
 def test_bug4_sqlite_period_fallback_ordering_and_notice():
-    """
-    Kiểm tra Bug #4: Khi kỳ được hỏi (FY2025) chưa có trong DB, `query_fact` phải trả về
-    kỳ mới nhất (`FY2024` thay vì `FY2022`) và câu trả lời phải thông báo rõ kỳ thực tế.
-    """
     pipeline = UnifiedFinancialRAGPipeline()
     pipeline.store.upsert_facts([
         FinancialFact(company="FPT", period="FY2022", metric_code="net_revenue", metric_name="Doanh thu thuần", value=44000.0, vas_code="10", statement_type="income_statement"),
@@ -128,10 +117,6 @@ def test_bug4_sqlite_period_fallback_ordering_and_notice():
 
 
 def test_bug5_negative_numbers_and_zero_preserved():
-    """
-    Kiểm tra Bug #5: Các khoản lỗ hoặc lưu chuyển tiền thuần âm dạng `(1.250.500)` hoặc `-450.25`
-    và số `0` phải được giữ nguyên.
-    """
     extractor = FactExtractor()
     assert extractor._clean_number("(1.250.500)") == -1250500.0
     assert extractor._clean_number("-450.25") == -450.25
@@ -147,10 +132,6 @@ def test_bug5_negative_numbers_and_zero_preserved():
 
 
 def test_bug6_numerical_verifier_checks_small_percentages_and_ratios():
-    """
-    Kiểm tra Bug #6: `NumericalVerifier` phải bắt được các số nhỏ `<= 10` (ví dụ biên lợi nhuận 8.5%
-    bị LLM bịa thành 9.8%).
-    """
     verifier = NumericalVerifier()
     good_check = verifier.verify(
         "Tăng trưởng doanh thu năm 2024 đạt 6.45% và hệ số thanh toán là 1.82 lần.",
@@ -169,10 +150,6 @@ def test_bug6_numerical_verifier_checks_small_percentages_and_ratios():
 
 
 def test_end_to_end_deterministic_yoy_ratio_and_reconciliation():
-    """
-    Kiểm tra Bug #3: Toàn bộ luồng tính toán YoY, ROE/Biên lợi nhuận gộp và Kiểm toán BCTC
-    hoạt động khép kín với độ chính xác Decimal.
-    """
     pipeline = UnifiedFinancialRAGPipeline()
     pages_2023 = [
         {
@@ -203,7 +180,6 @@ def test_end_to_end_deterministic_yoy_ratio_and_reconciliation():
     pipeline.ingest_pages(pages_2023, company="FPT", period="FY2023")
     pipeline.ingest_pages(pages_2024, company="FPT", period="FY2024")
 
-    # 1. Hỏi tăng trưởng YoY
     yoy_out = pipeline.answer_question(
         "Tăng trưởng doanh thu thuần của FPT năm 2024 so với 2023?",
         company="FPT",
@@ -214,7 +190,6 @@ def test_end_to_end_deterministic_yoy_ratio_and_reconciliation():
     assert yoy_out["calculation"]["pct_change"] == 19.44
     assert yoy_out["verification"]["is_verified"] is True
 
-    # 2. Hỏi Biên lợi nhuận gộp
     margin_out = pipeline.answer_question(
         "Tính biên lợi nhuận gộp của FPT kỳ FY2024",
         company="FPT",
@@ -224,7 +199,6 @@ def test_end_to_end_deterministic_yoy_ratio_and_reconciliation():
     assert margin_out["calculation"]["value"] == 39.14
     assert margin_out["verification"]["is_verified"] is True
 
-    # 3. Hỏi báo cáo kiểm toán cân đối BCTC
     audit_out = pipeline.answer_question(
         "Kiểm toán đẳng thức kế toán BCTC FPT",
         company="FPT",
@@ -234,12 +208,7 @@ def test_end_to_end_deterministic_yoy_ratio_and_reconciliation():
     assert "ĐẠT CHUẨN" in audit_out["answer"]
 
 
-
-
 def test_upgrade1_unit_scale_normalizer():
-    """Kiểm tra Nâng cấp #1: Tự động quy đổi 'Đơn vị tính: Triệu đồng' và 'Tỷ đồng' về VND chuẩn."""
-    from unified_financial_rag_colab_t4 import UnitScaleNormalizer
-
     unit, mult = UnitScaleNormalizer.detect_unit_and_multiplier("Bảng cân đối kế toán - Đơn vị tính: Triệu đồng")
     assert unit == "VND"
     assert mult == 1_000_000.0
@@ -252,17 +221,11 @@ def test_upgrade1_unit_scale_normalizer():
 
 
 def test_upgrade2_report_scope_detector():
-    """Kiểm tra Nâng cấp #2: Phân biệt BCTC Hợp nhất (consolidated) và BCTC Riêng (separate)."""
-    from unified_financial_rag_colab_t4 import ReportScopeDetector
-
     assert ReportScopeDetector.detect_scope("BÁO CÁO TÀI CHÍNH HỢP NHẤT NĂM 2024") == "consolidated"
     assert ReportScopeDetector.detect_scope("BÁO CÁO TÀI CHÍNH RIÊNG CÔNG TY MẸ NĂM 2024") == "separate"
 
 
 def test_upgrade3_vlm_ocr_sqlite_cache():
-    """Kiểm tra Nâng cấp #3: Lưu cache SHA-256 cho kết quả đọc bảng của Qwen2.5-VL trên Colab T4."""
-    from unified_financial_rag_colab_t4 import PageOCRCacheManager, UnifiedSQLiteStore
-
     store = UnifiedSQLiteStore(":memory:")
     cache = PageOCRCacheManager(store.conn)
     h = cache.compute_hash("fpt_page_5_image_bytes")
@@ -274,23 +237,11 @@ def test_upgrade3_vlm_ocr_sqlite_cache():
     assert loaded == sample_rows
 
 
-
-
 def test_upgrade4_default_seed_and_real_pdf_file_ingestion():
-    """
-    Kiểm tra khắc phục lỗi không nạp được tài liệu trên Gradio:
-    1. Khi khởi tạo `UnifiedFinancialRAGPipeline()`, dữ liệu mẫu FPT FY2023 & FY2024 được nạp sẵn
-       để bấm nút hỏi ngay trên Gradio luôn trả về số liệu chuẩn xác.
-    2. Tạo một file `.pdf` thực tế trên đĩa và gọi `ingest_pdf_file()` để kiểm chứng luồng Upload PDF.
-    """
-    import tempfile
-    from pathlib import Path
-
     pipeline = UnifiedFinancialRAGPipeline(seed_sample_data_if_empty=True)
     summary = pipeline.get_database_summary()
     assert summary["total_facts"] >= 15
 
-    # Hỏi ngay lập tức mà không cần nạp thủ công
     immediate_ans = pipeline.answer_question(
         "Tổng cộng tài sản của FPT năm 2024 là bao nhiêu?",
         company="FPT",
@@ -299,26 +250,13 @@ def test_upgrade4_default_seed_and_real_pdf_file_ingestion():
     assert "72,000" in immediate_ans["answer"]
     assert immediate_ans["verification"]["is_verified"] is True
 
-    # Kiểm thử tạo file PDF vật lý và nạp qua `ingest_pdf_file`
     from pypdf import PdfWriter
-    import io
-    try:
-        from reportlab.pdfgen import canvas
-        buf = io.BytesIO()
-        c = canvas.Canvas(buf)
-        c.drawString(50, 780, "CONG TY CO PHAN SUA VIET NAM (VNM) - BAO CAO TAI CHINH HOP NHAT 2024")
-        c.drawString(50, 750, "Bang can doi ke toan hop nhat")
-        c.drawString(50, 720, "Tai san ngan han   100   V.01   35.000   31.000")
-        c.drawString(50, 700, "Tai san dai han    200   V.02   20.000   19.000")
-        c.drawString(50, 680, "Tong cong tai san  270          55.000   50.000")
-        c.save()
-        pdf_bytes = buf.getvalue()
-    except Exception:
-        writer = PdfWriter()
-        writer.add_blank_page(width=595, height=842)
-        buf = io.BytesIO()
-        writer.write(buf)
-        pdf_bytes = buf.getvalue()
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=595, height=842)
+    buf = io.BytesIO()
+    writer.write(buf)
+    pdf_bytes = buf.getvalue()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         pdf_path = Path(tmpdir) / "VNM_BCTC_2024.pdf"
@@ -329,19 +267,44 @@ def test_upgrade4_default_seed_and_real_pdf_file_ingestion():
         assert ingest_res["pages_read"] == 1
 
 
+def test_upgrade5_pdfplumber_sparse_empty_cells_and_nfd_unicode():
+    """
+    Kiểm tra lỗi thực tế khi `pdfplumber` sinh ra các ô trống `""` xen giữa cột Chỉ tiêu và Mã số VAS,
+    hoặc khi PDF dùng bảng mã Unicode tổ hợp NFD.
+    """
+    extractor = FactExtractor()
+    nfd_label = unicodedata.normalize("NFD", "1. Tiền và các khoản tương đương tiền")
+    sparse_rows = [
+        [nfd_label, "", None, "110", "", "V.02", "", "9.315.000", "", "8.279.000"],
+    ]
+    facts = extractor.extract_from_table_rows(
+        sparse_rows, company="FPT", period="FY2024", statement_type="balance_sheet"
+    )
+    assert len(facts) == 1
+    assert facts[0].vas_code == "110"
+    assert facts[0].metric_code == "cash_and_equivalents"
+    assert facts[0].value == 9315000.0
+
+
+def test_upgrade6_wireless_plain_text_table_with_and_without_vas_code():
+    """
+    Kiểm tra hàm `_extract_vas_rows_from_plain_text` bóc tách được cả dòng có Mã số VAS
+    lẫn dòng bảng tóm tắt không có cột Mã số VAS.
+    """
+    pipeline = UnifiedFinancialRAGPipeline()
+    raw_page_text = (
+        "I. TÀI SẢN NGẮN HẠN   100   V.01   45.610   36.705\n"
+        "Tổng cộng tài sản   72.000   60.283\n"
+    )
+    rows = pipeline._extract_vas_rows_from_plain_text(raw_page_text)
+    assert len(rows) == 2
+    assert rows[0][1] == "100"
+    assert rows[0][3] == "45.610"
+    assert rows[1][1] == "270"
+    assert rows[1][3] == "72.000"
+
+
 class TestUnifiedFinancialPipelineSuite(unittest.TestCase):
-    def test_07_unit_scale_normalizer(self):
-        test_upgrade1_unit_scale_normalizer()
-
-    def test_08_report_scope_detector(self):
-        test_upgrade2_report_scope_detector()
-
-    def test_09_vlm_ocr_sqlite_cache(self):
-        test_upgrade3_vlm_ocr_sqlite_cache()
-
-    def test_10_default_seed_and_real_pdf_file_ingestion(self):
-        test_upgrade4_default_seed_and_real_pdf_file_ingestion()
-
     def test_01_mislabeled_pdf(self):
         test_bug1_detect_mislabeled_nvda_analog_devices_pdf()
 
@@ -359,6 +322,24 @@ class TestUnifiedFinancialPipelineSuite(unittest.TestCase):
 
     def test_06_end_to_end_deterministic_qa(self):
         test_end_to_end_deterministic_yoy_ratio_and_reconciliation()
+
+    def test_07_unit_scale_normalizer(self):
+        test_upgrade1_unit_scale_normalizer()
+
+    def test_08_report_scope_detector(self):
+        test_upgrade2_report_scope_detector()
+
+    def test_09_vlm_ocr_sqlite_cache(self):
+        test_upgrade3_vlm_ocr_sqlite_cache()
+
+    def test_10_default_seed_and_real_pdf_file_ingestion(self):
+        test_upgrade4_default_seed_and_real_pdf_file_ingestion()
+
+    def test_11_pdfplumber_sparse_empty_cells_and_nfd_unicode(self):
+        test_upgrade5_pdfplumber_sparse_empty_cells_and_nfd_unicode()
+
+    def test_12_wireless_plain_text_table_with_and_without_vas_code(self):
+        test_upgrade6_wireless_plain_text_table_with_and_without_vas_code()
 
 
 if __name__ == "__main__":
