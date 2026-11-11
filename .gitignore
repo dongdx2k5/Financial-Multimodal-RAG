@@ -22,3 +22,10 @@ data/index/**
 !data/index/.gitkeep
 *.pyc
 
+# Docs and markdown files (keep only README.md)
+docs/
+*.md
+**/*.md
+!README.md
+
+
