@@ -263,25 +263,26 @@ dữ kiện regex trong TXT hiện chỉ hỗ trợ truy xuất đoạn, không 
 src/financial_rag/
   api.py, cli.py                 Web API và dòng lệnh
   app.html, dashboard.js         Giao diện, tổng quan và graph explorer
-  ingestion.py                  Đọc tài liệu, OCR, chia chunks
-  financial_tables.py           Trích dòng bảng theo tọa độ
+  ingestion.py                  Đọc tài liệu, OCR, chia chunks (hỗ trợ nối bảng đa trang)
+  financial_tables.py           Trích dòng bảng theo tọa độ và nối bảng đa trang
   ocr_recovery.py                Phục hồi OCR mã dòng
   extraction.py, models.py       Trích facts và schema dữ liệu
   graph.py, retrieval.py         NetworkX graph và TF-IDF + graph retrieval
+  sqlite_store.py               Lưu trữ SQLite hiệu năng cao kèm FTS5 BM25 search
+  chart_reader.py               Trích xuất số liệu và fact từ vùng biểu đồ/sơ đồ
   answers.py, calculator.py      Hỏi số liệu và phép tính
   quality.py, analytics.py       Kiểm tra kế toán và tổng quan
-  ollama_client.py               Client cũ độc lập, không được service.ask gọi
   service.py, config.py          Điều phối và cấu hình
   storage.py, jobs.py            Ghi JSON và tác vụ nền
-scripts/                        Cài OCR, tải dataset, kiểm thử báo cáo/Ollama
-tests/                          Kiểm thử tự động
-samples/                        Báo cáo demo dạng text
-docs/                           Hướng dẫn và kiến trúc
+scripts/                        Cài OCR, gán nhãn layout (Label Studio / YOLO), tải dataset
+tests/                          Kiểm thử tự động (166+ test cases)
+samples/                        Báo cáo demo dạng text và PDF (kèm bảng và biểu đồ)
+docs/                           Tài liệu kiến trúc, QA tất định, OCR, Antigravity, Gán nhãn DLA
 data/uploads/                   Bản sao tài liệu người dùng, không đưa lên Git
 data/processed/                 OCR cache, metadata báo cáo, jobs.json
 data/index/                     graph.json, chunks.json
 data/raw/                       Dataset tải tùy chọn
-start-local.ps1                 Lệnh chạy tắt cho cấu hình máy C:\DXD
+start-local.ps1                 Lệnh khởi chạy nhanh ứng dụng cục bộ
 ```
 
 ## Dataset

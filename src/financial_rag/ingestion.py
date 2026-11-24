@@ -292,6 +292,7 @@ class Chunker:
         from .financial_tables import extract_statement
 
         chunks: list[Chunk] = []
+        stitch_context: dict = {}
         for page in document.pages:
             if page.ocr_engine == "vietocr":
                 # Legacy column parsing expects word boxes. A detected line can
@@ -300,7 +301,7 @@ class Chunker:
                     "VietOCR thử nghiệm: chỉ truy xuất bằng chứng; chưa tạo dữ kiện để tính toán."
                 ]
             else:
-                rows, warnings = extract_statement(page, document)
+                rows, warnings = extract_statement(page, document, context=stitch_context)
             for row in rows:
                 row.ocr_engine = page.ocr_engine
             chunks.extend(rows)

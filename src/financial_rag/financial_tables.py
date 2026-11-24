@@ -107,12 +107,16 @@ def money(raw: str):
     return -number if value.startswith("(") else number
 
 
-def extract_statement(page: PageContent, document: Document):
+def extract_statement(page: PageContent, document: Document, context: dict | None = None):
     kind = statement_kind(page.text)
-    if not kind or not page.words or not page.width:
+    if not page.words or not page.width:
+        if context:
+            context.clear()
         return [], []
     warnings = []
     headers = []
+
+    # Check for date headers on the current page
     for w in page.words:
         match = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(20\d{2})", w[4])
         if match and w[0] > page.width * 0.55 and w[1] < page.height * 0.3:
@@ -123,21 +127,53 @@ def extract_statement(page: PageContent, document: Document):
                 continue
             headers.append((w, dt))
     headers.sort(key=lambda item: item[0][0])
-    if len(headers) != 2:
-        return [], [f"Trang {page.page}: chưa xác định chắc chắn hai cột kỳ báo cáo."]
-    centers = [(w[0] + w[2]) / 2 for w, _ in headers]
-    boundary = sum(centers) / 2
-    starts = centers[0] - (centers[1] - centers[0]) * 0.58
-    ends = centers[1] + (centers[1] - centers[0]) * 0.6
-    header_y = max(w[3] for w, _ in headers)
-    header_text = fold(page.text[:650]).replace(" ", "")
-    if kind != "balance" and "bathang" not in header_text:
-        return [], [
-            f"Trang {page.page}: chưa hỗ trợ tự gán kỳ cho bảng không rõ giai đoạn ba tháng."
-        ]
-    units = ["VND" if re.search(r"\bVND\b", page.text[:1000]) else None] * 2
-    if not all(units):
-        return [], [f"Trang {page.page}: thiếu đơn vị tiền tệ rõ ràng."]
+
+    is_continuation = False
+    # Check if page is continuing an active statement from the preceding page
+    if len(headers) != 2 and context and context.get("kind") and page.page == context.get("page_num", -1) + 1:
+        cand_kind = context["kind"]
+        if kind is None or kind == cand_kind:
+            has_codes = any(
+                w[4].strip(".") in METRICS[cand_kind]
+                for w in page.words
+                if page.width * 0.43 < (w[0] + w[2]) / 2 < page.width * 0.50
+            )
+            if has_codes:
+                kind = cand_kind
+                headers = context["headers"]
+                boundary = context["boundary"]
+                starts = context["starts"]
+                ends = context["ends"]
+                header_y = page.height * 0.05
+                is_continuation = True
+                warnings.append(f"Trang {page.page}: nối tiếp bảng {kind} từ trang {context['page_num']}.")
+
+    if not is_continuation:
+        if not kind:
+            if context:
+                context.clear()
+            return [], []
+        if len(headers) != 2:
+            if context:
+                context.clear()
+            return [], [f"Trang {page.page}: chưa xác định chắc chắn hai cột kỳ báo cáo."]
+        centers = [(w[0] + w[2]) / 2 for w, _ in headers]
+        boundary = sum(centers) / 2
+        starts = centers[0] - (centers[1] - centers[0]) * 0.58
+        ends = centers[1] + (centers[1] - centers[0]) * 0.6
+        header_y = max(w[3] for w, _ in headers)
+        header_text = fold(page.text[:650]).replace(" ", "")
+        if kind != "balance" and "bathang" not in header_text:
+            if context:
+                context.clear()
+            return [], [
+                f"Trang {page.page}: chưa hỗ trợ tự gán kỳ cho bảng không rõ giai đoạn ba tháng."
+            ]
+        units = ["VND" if re.search(r"\bVND\b", page.text[:1000]) else None] * 2
+        if not all(units):
+            if context:
+                context.clear()
+            return [], [f"Trang {page.page}: thiếu đơn vị tiền tệ rõ ràng."]
     lines = spatial_lines(page.words)
     chunks = []
     for row_index, (y, words) in enumerate(lines):
@@ -245,4 +281,17 @@ def extract_statement(page: PageContent, document: Document):
                 financial_rows=values,
             )
         )
+    if context is not None:
+        last_code = chunks[-1].financial_rows[0].get("metric_code") if chunks else None
+        if last_code in {"440", "60", "70"}:
+            context.clear()
+        elif chunks:
+            context.update({
+                "kind": kind,
+                "headers": headers,
+                "boundary": boundary,
+                "starts": starts,
+                "ends": ends,
+                "page_num": page.page,
+            })
     return chunks, warnings
