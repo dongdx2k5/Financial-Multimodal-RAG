@@ -234,9 +234,32 @@
     } else {
       facts = [];
       currentAnalysis = null;
+      viewerState = { ...viewerState, docId: null, page: 1, maxPages: 1, chunkId: null };
       el('reportInfo').textContent = '';
+      el('original').removeAttribute('href');
+      el('summaryWarning').textContent = '';
       el('facts').replaceChildren();
       el('kpiGrid').replaceChildren();
+      el('kpiChart').replaceChildren();
+      el('ratiosList').replaceChildren();
+      el('quality').textContent = '';
+      el('left').replaceChildren();
+      el('right').replaceChildren();
+      el('answer').textContent = '';
+      el('mode').textContent = '';
+      el('warnings').replaceChildren();
+      el('trace').hidden = true;
+      el('evidence').replaceChildren();
+      el('chatHistory').replaceChildren();
+      el('sourceImage').hidden = true;
+      el('sourceImage').removeAttribute('src');
+      el('pageIndicator').textContent = 'Trang -';
+      el('viewerTitle').textContent =
+        'Bấm trích dẫn [1] hoặc nút "Xem nguồn" để mở trang PDF và tô sáng vùng bằng chứng màu cam.';
+      graphState = { ...graphState, nodes: [], edges: [], selected: null };
+      drawGraph();
+      el('graphInfo').textContent = 'Chọn báo cáo và nhấn Tải đồ thị để khám phá nút và liên kết.';
+      el('graphDetail').replaceChildren();
     }
   }
 

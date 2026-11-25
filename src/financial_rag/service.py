@@ -69,6 +69,20 @@ class FinancialRAGService:
         warnings = [w for page in document.pages for w in page.warnings]
         if not chunks:
             raise ValueError("Không đọc được văn bản. PDF scan cần OCR. " + " ".join(warnings))
+        scan_warn_pages = sum(
+            any("cần bật OCR" in w for w in page.warnings) for page in document.pages
+        )
+        if (
+            not self.settings.ocr_enabled
+            and document.pages
+            and scan_warn_pages >= max(1, len(document.pages) - 1)
+            and sum(len(c.text) for c in chunks) < 400
+            and not any(c.financial_rows or c.table for c in chunks)
+        ):
+            raise ValueError(
+                "Tài liệu chủ yếu là ảnh scan (chỉ đọc được phần chữ ký/tiêu đề ngắn); "
+                "hãy bật OCR_ENABLED=true trong .env rồi nạp lại."
+            )
         facts = [fact for chunk in chunks for fact in self.extractor.extract(chunk)]
         from .quality import check_facts
 

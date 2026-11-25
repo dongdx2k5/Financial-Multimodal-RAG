@@ -51,6 +51,28 @@ def test_scan_fails_explicitly_without_ocr(tmp_path):
         service.ingest(path)
 
 
+def test_scanned_pdf_with_digital_signature_only_fails_without_ocr(tmp_path):
+    pdf = pymupdf.open()
+    sample_page = pdf.new_page()
+    sample_page.insert_text((40, 40), "Sample scan")
+    img_bytes = sample_page.get_pixmap().tobytes("png")
+    pdf.close()
+
+    scanned_pdf = pymupdf.open()
+    for i in range(3):
+        p = scanned_pdf.new_page()
+        p.insert_image(p.rect, stream=img_bytes)
+        if i == 0:
+            p.insert_text((40, 40), "Digitally signed by DEMO")
+    path = tmp_path / "signed_scan.pdf"
+    scanned_pdf.save(path)
+    scanned_pdf.close()
+
+    service = FinancialRAGService(Settings(data_dir=tmp_path / "data", ocr_enabled=False))
+    with pytest.raises(ValueError, match="OCR_ENABLED=true"):
+        service.ingest(path)
+
+
 def test_table_alignment_negative_values_and_calculator():
     chunk = Chunk(
         id="table",

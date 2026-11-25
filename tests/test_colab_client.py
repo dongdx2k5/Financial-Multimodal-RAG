@@ -49,6 +49,7 @@ def test_colab_grounded_synthesis_and_intent_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr("financial_rag.colab_client.urlopen", fake_urlopen)
     service = FinancialRAGService(
         Settings(
+            _env_file=None,
             data_dir=tmp_path / "data",
             colab_gpu_url="https://demo-worker.trycloudflare.com",
             colab_api_token="secret-tok",
