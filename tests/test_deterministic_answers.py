@@ -161,11 +161,29 @@ def test_exact_question_never_calls_model(service, monkeypatch):
     def fail(*args, **kwargs):
         raise AssertionError("No network model call is allowed")
 
-    monkeypatch.setattr("financial_rag.ollama_client.urlopen", fail)
+    monkeypatch.setattr("financial_rag.colab_client.urlopen", fail)
+    service.settings.colab_gpu_url = "https://demo.trycloudflare.com"
     response = service.ask("LNST quý 1/2026", document_id="report", use_llm=True)
     assert response.answer_status == "answered"
     assert response.llm_model is None
     assert any("bỏ qua use_llm" in w for w in response.warnings)
+
+
+def test_single_year_growth_compares_with_prior_year(service):
+    response = service.ask(
+        "Doanh thu thuần quý 1/2025 tăng bao nhiêu phần trăm so với cùng kỳ",
+        document_id="report",
+    )
+    assert response.answer_status == "answered"
+    assert response.mode == "calculation"
+    assert "25,00 %" in response.answer
+    assert {e.graph_facts[0].period for e in response.evidence} == {2025, 2024}
+
+
+def test_quarter_shorthand_q1_supported(service):
+    response = service.ask("Doanh thu thuần Q1/2026 là bao nhiêu?", document_id="report")
+    assert response.answer_status == "answered"
+    assert "120 VND" in response.answer
 
 
 def test_public_api_exposes_policy_and_decision(service, monkeypatch):

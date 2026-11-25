@@ -13,7 +13,7 @@ from financial_rag.service import FinancialRAGService
 
 
 def test_pdf_upload_persists_and_repeat_is_idempotent(tmp_path, monkeypatch):
-    service = FinancialRAGService(Settings(data_dir=tmp_path, openai_api_key=None))
+    service = FinancialRAGService(Settings(data_dir=tmp_path))
     monkeypatch.setattr(api, "service", service)
     pdf = pymupdf.open()
     page = pdf.new_page()
@@ -35,7 +35,7 @@ def test_pdf_upload_persists_and_repeat_is_idempotent(tmp_path, monkeypatch):
         assert answer.json()["evidence"]
         assert client.get("/").status_code == 200
         assert client.get("/documents/unknown/file").status_code == 404
-    reloaded = FinancialRAGService(Settings(data_dir=tmp_path, openai_api_key=None))
+    reloaded = FinancialRAGService(Settings(data_dir=tmp_path))
     assert reloaded.ask("Revenue").evidence
     assert Path(reloaded.retriever.chunks[0].source).exists()
 
@@ -72,10 +72,8 @@ def test_table_alignment_negative_values_and_calculator():
         calculate("growth", facts[0], facts[1].model_copy(update={"value": 0}))
 
 
-def test_document_filter_and_missing_llm_key(tmp_path):
-    service = FinancialRAGService(
-        Settings(data_dir=tmp_path / "data", openai_api_key=None, llm_provider="openai")
-    )
+def test_document_filter_and_unconfigured_colab(tmp_path):
+    service = FinancialRAGService(Settings(data_dir=tmp_path / "data", colab_gpu_url=None))
     for ticker, value in [("AAA", 100), ("BBB", 200)]:
         path = tmp_path / f"{ticker}.txt"
         path.write_text(f"Doanh thu năm 2024 đạt {value} tỷ đồng.", encoding="utf-8")
@@ -83,6 +81,13 @@ def test_document_filter_and_missing_llm_key(tmp_path):
     response = service.ask("Doanh thu", document_id=report["document_id"], use_llm=True)
     assert response.mode == "evidence" and response.warnings
     assert all("200" in e.text for e in response.evidence)
+    # Regex facts must carry document_id so /analysis includes them.
+    facts = [
+        attrs
+        for _, attrs in service.graph.graph.nodes(data=True)
+        if attrs.get("kind") == "Fact" and attrs.get("document_id") == report["document_id"]
+    ]
+    assert facts and facts[0]["value"] == 200.0
 
 
 def test_pdf_table_is_extracted(tmp_path):
@@ -107,25 +112,22 @@ def test_pdf_table_is_extracted(tmp_path):
     assert [(f.period, f.value) for f in facts] == [(2024, 1250), (2023, 1000)]
 
 
-def test_openai_configuration_cannot_enable_generation(tmp_path, monkeypatch):
-    import sys
-    from types import SimpleNamespace
+def test_cross_unit_currency_calculation():
+    from financial_rag.models import FinancialFact
 
-    calls = []
-
-    class Client:
-        def __init__(self, **kwargs):
-            calls.append(kwargs)
-            raise AssertionError("The answering service must never instantiate OpenAI.")
-
-    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=Client))
-    service = FinancialRAGService(
-        Settings(data_dir=tmp_path / "data", openai_api_key="test-only", llm_provider="openai")
+    left = FinancialFact(
+        id="l",
+        metric="Doanh thu",
+        value=2.0,
+        raw_value="2",
+        unit="tỷ",
+        period=2025,
+        chunk_id="c1",
+        source="r.pdf",
+        page=1,
+        confidence=0.9,
+        ticker="ABC",
     )
-    path = tmp_path / "report.txt"
-    path.write_text("Doanh thu năm 2024 đạt 100 tỷ đồng.", encoding="utf-8")
-    service.ingest(path)
-    response = service.ask("Doanh thu", use_llm=True)
-    assert response.mode == "evidence" and response.warnings
-    assert response.answer_status == "evidence_only"
-    assert calls == []
+    right = left.model_copy(update={"id": "r", "value": 1000.0, "raw_value": "1000", "unit": "triệu", "period": 2024})
+    assert calculate("growth", left, right)["value"] == "100"
+    assert calculate("difference", left, right)["value"] == "1.0"

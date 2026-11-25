@@ -6,10 +6,10 @@ from fastapi.testclient import TestClient
 
 from financial_rag import api
 from financial_rag.analytics import summarize
+from financial_rag.colab_client import ColabGPUError, probe, synthesize
 from financial_rag.config import Settings
 from financial_rag.jobs import JobStore
 from financial_rag.models import FinancialFact
-from financial_rag.ollama_client import OllamaError, generate, probe
 from financial_rag.service import FinancialRAGService
 from financial_rag.storage import atomic_json
 
@@ -95,22 +95,25 @@ def test_job_queue_is_bounded(tmp_path):
         store.create("b.pdf")
 
 
-def test_ollama_probe_and_busy_guard(monkeypatch):
-    from financial_rag import ollama_client
+def test_colab_probe_and_busy_guard(monkeypatch):
+    from financial_rag import colab_client
 
     monkeypatch.setattr(
-        ollama_client,
+        colab_client,
         "urlopen",
-        lambda *a, **k: io.BytesIO(json.dumps({"models": [{"name": "qwen2.5:3b"}]}).encode()),
+        lambda *a, **k: io.BytesIO(
+            json.dumps({"status": "ok", "gpu": {"name": "Tesla T4"}}).encode()
+        ),
     )
-    assert probe(Settings(llm_provider="ollama"))["ready"]
-    assert not probe(Settings(llm_provider="ollama", ollama_model="missing"))["ready"]
-    ollama_client._generation_lock.acquire()
+    res = probe(Settings(colab_gpu_url="https://demo.trycloudflare.com"))
+    assert res["ready"]
+    assert res["gpu"]["name"] == "Tesla T4"
+    colab_client._generation_lock.acquire()
     try:
-        with pytest.raises(OllamaError, match="đang xử lý"):
-            generate(Settings(), "Question", "[1] Evidence")
+        with pytest.raises(ColabGPUError, match="đang xử lý"):
+            synthesize(Settings(colab_gpu_url="https://demo.trycloudflare.com"), "Question", "[1] Evidence")
     finally:
-        ollama_client._generation_lock.release()
+        colab_client._generation_lock.release()
 
 
 @pytest.fixture
@@ -151,6 +154,33 @@ def test_api_dashboard_export_graph_and_limits(client):
     assert client.post("/ask", json={"question": "x" * 2001}).status_code == 422
     assert client.post("/ingest", files={"file": ("a.txt", b"")}).status_code == 400
     assert client.get("/assets/dashboard.js").status_code == 200
+    assert client.get("/assets/styles.css").status_code == 200
+    assert client.get("/health/colab").status_code == 200
+
+    # Verify human-in-the-loop fact verification endpoint + cross-document compare endpoint
+    analysis_data = client.get(f"/documents/{ids[0]}/analysis").json()
+    first_fact_id = analysis_data["facts"][0]["id"]
+    patched = client.patch(
+        f"/facts/{first_fact_id}",
+        json={"value": 105.0, "raw_value": "105", "quality": "verified"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["fact"]["quality"] == "verified"
+
+    cmp_resp = client.post(
+        "/compare",
+        json={
+            "left_document_id": ids[0],
+            "right_document_id": ids[1],
+            "statement": "income",
+            "metric_code": "10",
+            "operation": "difference",
+        },
+    )
+    assert cmp_resp.status_code == 422  # TXT regex facts have no circular-200 metric_code
+
+    assert client.delete(f"/documents/{ids[1]}").status_code == 200
+    assert len(client.get("/documents").json()) == 1
 
 
 def test_background_job_completed_and_persisted(client, monkeypatch):

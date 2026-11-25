@@ -68,8 +68,28 @@ class KnowledgeGraph:
             self.graph.add_edge(fact.id, fact.chunk_id, relation="SUPPORTED_BY")
         self.save()
 
+    def remove_document(self, document_id: str) -> None:
+        if document_id in self.graph:
+            owned = [
+                n
+                for n, a in self.graph.nodes(data=True)
+                if a.get("kind") in {"Chunk", "Fact"}
+                and (a.get("document_id") == document_id or self.graph.has_edge(document_id, n))
+            ]
+            self.graph.remove_nodes_from(owned + [document_id])
+            self.save()
+
     def facts_for_chunk(self, chunk_id: str) -> list[FinancialFact]:
         result = []
+        if chunk_id in self.graph:
+            for node_id in self.graph.predecessors(chunk_id):
+                attrs = self.graph.nodes[node_id]
+                if attrs.get("kind") == "Fact":
+                    result.append(
+                        FinancialFact(id=node_id, **{k: v for k, v in attrs.items() if k != "kind"})
+                    )
+            if result:
+                return result
         for node_id, attrs in self.graph.nodes(data=True):
             if attrs.get("kind") == "Fact" and attrs.get("chunk_id") == chunk_id:
                 result.append(

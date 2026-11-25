@@ -1,9 +1,13 @@
 import json
 from pathlib import Path
 
+import pytest
+
+from financial_rag.layout_detector import LayoutDetectionError, YOLOLayoutDetector
 from scripts.create_sample_pdf import generate_sample_pdf
 from scripts.label_studio_to_yolo import convert_label_studio_to_yolo
 from scripts.pdf_to_annotations import process_pdf
+from scripts.xanylabeling_to_yolo import convert_xanylabeling_to_yolo
 
 
 def test_layout_annotation_pipeline(tmp_path: Path):
@@ -70,3 +74,17 @@ def test_layout_annotation_pipeline(tmp_path: Path):
     assert (yolo_final / "data.yaml").exists()
     assert len(list((yolo_final / "images" / "train").glob("*.png"))) == 1
     assert len(list((yolo_final / "labels" / "train").glob("*.txt"))) == 1
+
+    # 4. Test X-AnyLabeling JSON export & conversion
+    xany_dir = out_dir / "xanylabeling"
+    assert len(list(xany_dir.glob("*.json"))) == 1
+    yolo_xany = tmp_path / "yolo_xany"
+    summary = convert_xanylabeling_to_yolo(xany_dir, images_dir, yolo_xany, val_split=0.0)
+    assert summary["images"] == 1
+    assert (yolo_xany / "data.yaml").exists()
+
+
+def test_yolo_detector_requires_explicit_model(tmp_path: Path):
+    detector = YOLOLayoutDetector(tmp_path / "missing.onnx")
+    with pytest.raises(LayoutDetectionError, match="LAYOUT_MODEL_PATH"):
+        detector._load_session()

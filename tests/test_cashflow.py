@@ -65,6 +65,16 @@ def test_cash_reconciliation_and_cross_statement():
     assert facts[-1].quality == "needs_review"
 
 
+def test_q2_opening_cash_reconciles_with_q1_closing_balance():
+    facts = [
+        fact("60", 119, "cashflow", "2026-Q2"),
+        fact("110", 119, "balance", "2026-03-31"),
+    ]
+    checks = check_facts(facts)
+    cross = [c for c in checks if c["statement"] == "cross_statement" and c["target_code"] == "60"]
+    assert len(cross) == 1 and cross[0]["status"] == "pass"
+
+
 def test_no_mix_between_reports_or_duplicates():
     facts = [fact("50", 20), fact("60", 100), fact("61", -1, document="b"), fact("70", 119)]
     assert not any(c["status"] == "pass" for c in check_facts(facts))

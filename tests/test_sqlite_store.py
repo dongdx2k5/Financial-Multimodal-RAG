@@ -69,3 +69,14 @@ def test_sqlite_store_lifecycle(tmp_path: Path):
     assert len(facts) == 1
     assert facts[0].value == 150000.0
     assert facts[0].metric == "Doanh thu thuần"
+
+    # 4. Test Human-in-the-loop fact update & cascading delete
+    updated = store.update_fact("fact_rev_2024", value=155000.0, raw_value="155.000", quality="verified")
+    assert updated is not None and updated.value == 155000.0 and updated.quality == "verified"
+
+    deleted = store.delete_document("doc_vnm_2024")
+    assert deleted is not None and deleted["id"] == "doc_vnm_2024"
+    assert store.list_documents() == []
+    assert store.load_chunks("doc_vnm_2024") == []
+    assert store.load_facts("doc_vnm_2024") == []
+    assert store.search_chunks_fts("doanh thu") == []

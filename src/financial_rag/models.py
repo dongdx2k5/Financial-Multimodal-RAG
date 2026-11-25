@@ -45,6 +45,8 @@ class PageContent(BaseModel):
     ocr_lines: list[OCRSpan] = Field(default_factory=list)
     structured_tables: list[StructuredTable] = Field(default_factory=list)
     table_bboxes: list[list[float]] = Field(default_factory=list)
+    chart_bboxes: list[list[float]] = Field(default_factory=list)
+    chart_results: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class Document(BaseModel):
@@ -75,6 +77,7 @@ class Chunk(BaseModel):
     table_structure_engine: str | None = None
     table_cells: list[TableCell] = Field(default_factory=list)
     ocr_engine: str | None = None
+    chart_points: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class FinancialFact(BaseModel):

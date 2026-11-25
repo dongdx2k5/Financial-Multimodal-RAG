@@ -16,7 +16,11 @@ ALIASES = {
     "bien lai rong": "bien loi nhuan rong",
     "ln gop": "loi nhuan gop",
     "tong cong tai san": "tong tai san",
+    "tong cong nguon von": "tong nguon von",
     "von csh": "von chu so huu",
+    "chi phi qldn": "chi phi quan ly doanh nghiep",
+    "loi nhuan hdkd": "loi nhuan thuan tu hoat dong kinh doanh",
+    "tien va tuong duong tien": "tien va cac khoan tuong duong tien",
     "dong tien tu hoat dong kinh doanh": "dong tien kinh doanh",
     "luu chuyen tien thuan tu hoat dong kinh doanh": "dong tien kinh doanh",
     "dong tien tu hoat dong dau tu": "dong tien dau tu",
@@ -27,26 +31,43 @@ ALIASES = {
 INTENTS = [
     ("loi nhuan sau thue", "income", "60"),
     ("loi nhuan truoc thue", "income", "50"),
+    ("loi nhuan thuan tu hoat dong kinh doanh", "income", "30"),
     ("loi nhuan gop", "income", "20"),
     ("doanh thu thuan", "income", "10"),
     ("doanh thu hoat dong tai chinh", "income", "22"),
     ("doanh thu ban hang", "income", "01"),
     ("doanh thu", "income", "10"),
     ("gia von", "income", "11"),
+    ("chi phi tai chinh", "income", "23"),
+    ("chi phi lai vay", "income", "24"),
+    ("chi phi ban hang", "income", "25"),
+    ("chi phi quan ly doanh nghiep", "income", "26"),
     ("tong tai san", "balance", "280"),
+    ("tong nguon von", "balance", "440"),
+    ("tai san ngan han", "balance", "100"),
+    ("tien va cac khoan tuong duong tien", "balance", "110"),
+    ("tai san dai han", "balance", "200"),
     ("von chu so huu", "balance", "400"),
     ("no phai tra", "balance", "300"),
     ("hang ton kho", "balance", "140"),
     ("dong tien kinh doanh", "cashflow", "20"),
     ("dong tien dau tu", "cashflow", "30"),
     ("dong tien tai chinh", "cashflow", "40"),
+    ("luu chuyen tien thuan trong ky", "cashflow", "50"),
     ("tien dau ky", "cashflow", "60"),
     ("tien cuoi ky", "cashflow", "70"),
+]
+RATIO_INTENTS = [
+    ("he so no tren von chu so huu", "balance", "300", "400", "Hệ số nợ phải trả / VCSH"),
+    ("no tren von chu so huu", "balance", "300", "400", "Hệ số nợ phải trả / VCSH"),
+    ("kha nang thanh toan hien hanh", "balance", "100", "310", "Khả năng thanh toán hiện hành"),
+    ("he so thanh toan hien hanh", "balance", "100", "310", "Khả năng thanh toán hiện hành"),
 ]
 
 
 def expand_query(question):
     result = fold(question)
+    result = re.sub(r"\bq([1-4])\b", r"quy \1", result)
     for alias, full in ALIASES.items():
         result = re.sub(r"\b" + re.escape(alias) + r"\b", full, result)
     return result
@@ -73,9 +94,11 @@ def clarification(message, reason):
     )
 
 
-def supported_wording(q, matches, ticker=None):
+def supported_wording(q, matches, ticker=None, ratio_phrases=()):
     """Conservative vocabulary gate; never answer just the recognized half of a question."""
     remainder = q
+    for phrase in sorted(ratio_phrases, key=len, reverse=True):
+        remainder = re.sub(r"\b" + re.escape(phrase) + r"\b", " ", remainder)
     for phrase, _, _ in sorted(matches, key=lambda item: len(item[0]), reverse=True):
         remainder = re.sub(r"\b" + re.escape(phrase) + r"\b", " ", remainder)
     if ticker:
@@ -117,6 +140,12 @@ def factual_answer(service, question, document_id):
     q = expand_query(question)
     if not any(c.document_id == document_id and c.financial_rows for c in service.retriever.chunks):
         return None
+    ratio_matches = [item for item in RATIO_INTENTS if item[0] in q]
+    ratio_matches = [
+        item
+        for item in ratio_matches
+        if not any(item[0] != other[0] and item[0] in other[0] for other in ratio_matches)
+    ]
     margin = "bien" in q and ("loi nhuan" in q or "lai" in q)
     matches = [(phrase, statement, code) for phrase, statement, code in INTENTS if phrase in q]
     matches = [
@@ -124,7 +153,17 @@ def factual_answer(service, question, document_id):
         for item in matches
         if not any(item[0] != other[0] and item[0] in other[0] for other in matches)
     ]
-    intent = (matches[0][1], matches[0][2]) if matches else None
+    ratio_spec = ratio_matches[0] if len(ratio_matches) == 1 else None
+    if len(ratio_matches) > 1:
+        return None
+    if ratio_spec:
+        # Remove component phrases subsumed by the ratio name (e.g. "von chu so huu").
+        matches = [m for m in matches if m[0] not in ratio_spec[0]]
+        if matches:
+            return None
+        intent = (ratio_spec[1], ratio_spec[2])
+    else:
+        intent = (matches[0][1], matches[0][2]) if matches else None
     requested = {(statement, code) for _, statement, code in matches}
     if len(requested) > 1:
         return None
@@ -155,15 +194,18 @@ def factual_answer(service, question, document_id):
     ):
         return None
     report = service.graph.graph.nodes.get(document_id, {})
-    if not supported_wording(q, matches, report.get("ticker")):
+    ratio_phrases = (ratio_spec[0],) if ratio_spec else ()
+    if not supported_wording(q, matches, report.get("ticker"), ratio_phrases=ratio_phrases):
         return None
     if "hop nhat" in q and "rieng" in q:
         return clarification(
             "Hãy chọn một phạm vi: báo cáo riêng hoặc hợp nhất.", "multiple_scopes"
         )
-    if margin and any(term in q for term in ["tang", "giam", "chenh lech", "so voi", "so sanh"]):
+    if (margin or ratio_spec) and any(
+        term in q for term in ["tang", "giam", "chenh lech", "so voi", "so sanh"]
+    ):
         return clarification(
-            "Hiện chỉ tính biên lợi nhuận của một kỳ; chưa tính thay đổi biên giữa hai kỳ.",
+            "Hiện chỉ tính tỷ số tài chính của một kỳ; chưa tính thay đổi tỷ số giữa hai kỳ.",
             "margin_comparison_unsupported",
         )
     all_facts = [
@@ -231,7 +273,20 @@ def factual_answer(service, question, document_id):
             "Hãy hỏi một kỳ hoặc nêu rõ yêu cầu so sánh hai kỳ.", "multiple_periods"
         )
     if years and not growth:
-        facts = [f for f in facts if str(f.period) in years]
+        if "dau nam" in q:
+            year_set = set(years)
+            prev_ends = {f"{int(y) - 1}-12-31" for y in year_set}
+            facts = [
+                f for f in facts if str(f.period) in year_set or f.period_label in prev_ends
+            ]
+        elif "dau ky" in q and len(set(years)) == 1:
+            target_year = int(years[0])
+            prev_end = f"{target_year - 1}-12-31"
+            facts = [
+                f for f in facts if str(f.period) == str(target_year) or f.period_label == prev_end
+            ]
+        else:
+            facts = [f for f in facts if str(f.period) in years]
     if not facts:
         return AskResponse(
             answer="Không tìm thấy chỉ tiêu đúng kỳ được yêu cầu trong báo cáo này.",
@@ -264,6 +319,9 @@ def factual_answer(service, question, document_id):
         facts = [f for f in facts if f.period_label in wanted]
     if growth and len(set(years)) == 2 and not dates:
         facts = [f for f in facts if str(f.period) in years]
+    elif growth and len(set(years)) == 1 and not dates:
+        target_year = int(years[0])
+        facts = [f for f in facts if f.period is not None and f.period <= target_year]
     if not facts:
         return AskResponse(
             answer="Không có số liệu đúng ngày yêu cầu.", evidence=[], mode="evidence"
@@ -283,6 +341,7 @@ def factual_answer(service, question, document_id):
         intent != ("cashflow", "60")
         and not growth
         and not margin
+        and not ratio_spec
         and any(term in q for term in ["dau nam", "dau ky"])
     ):
         if any(f.period_kind != "instant" for f in facts):
@@ -291,9 +350,15 @@ def factual_answer(service, question, document_id):
                 evidence=[],
                 mode="evidence",
             )
-        # Beginning of year is specifically January 1, not merely the oldest observation.
+        # Beginning of year accepts Jan 1 (or prior Dec 31 if Jan 1 is absent).
         if "dau nam" in q:
-            facts = [f for f in facts if (f.period_label or "").endswith("-01-01")]
+            jan_ones = [f for f in facts if (f.period_label or "").endswith("-01-01")]
+            if jan_ones:
+                facts = jan_ones
+            else:
+                facts = [f for f in facts if (f.period_label or "").endswith("-12-31")]
+        elif "dau ky" in q and years and len(facts) < 2:
+            facts = []
         if not facts:
             return AskResponse(
                 answer="Không có số dư đầu năm trong dữ liệu.", evidence=[], mode="evidence"
@@ -330,6 +395,22 @@ def factual_answer(service, question, document_id):
                 mode="evidence",
             )
         chosen = [chosen[0], revenue[0]]
+    elif ratio_spec:
+        _, r_stmt, _, den_code, _ = ratio_spec
+        denom = [
+            f
+            for f in all_facts
+            if f.statement == r_stmt
+            and f.metric_code == den_code
+            and f.period_label == chosen[0].period_label
+        ]
+        if len(denom) != 1:
+            return AskResponse(
+                answer="Thiếu chỉ tiêu mẫu số cùng kỳ để tính tỷ số tài chính.",
+                evidence=[],
+                mode="evidence",
+            )
+        chosen = [chosen[0], denom[0]]
     evidence = []
     for fact in chosen:
         chunk = next((c for c in service.retriever.chunks if c.id == fact.chunk_id), None)
@@ -377,7 +458,7 @@ def factual_answer(service, question, document_id):
         or f.scope not in {"separate", "consolidated"}
         or not f.period_label
         or f.period is None
-        or f.period_kind not in {"instant", "quarter", "year"}
+        or f.period_kind not in {"instant", "quarter", "half_year", "nine_months", "year"}
         or not Decimal(str(f.value)).is_finite()
         for f in chosen
     ):
@@ -396,14 +477,14 @@ def factual_answer(service, question, document_id):
             warnings=warnings,
         )
     scope = "riêng" if chosen[0].scope == "separate" else chosen[0].scope
-    if growth or margin:
+    if growth or margin or ratio_spec:
         if len(chosen) != 2:
             return AskResponse(
                 answer="Chưa đủ hai kỳ để tính tăng trưởng.", evidence=evidence, mode="evidence"
             )
         operation = (
             "ratio"
-            if margin
+            if (margin or ratio_spec)
             else (
                 "difference"
                 if "chenh lech" in q and "%" not in q and "phan tram" not in q
@@ -420,13 +501,18 @@ def factual_answer(service, question, document_id):
         label = (
             "Biên lợi nhuận"
             if margin
-            else ("Chênh lệch" if operation == "difference" else "Thay đổi")
+            else (
+                ratio_spec[4]
+                if ratio_spec
+                else ("Chênh lệch" if operation == "difference" else "Thay đổi")
+            )
         )
         metric_label = chosen[0].metric.lower()
         if margin:
             metric_label = metric_label.removeprefix("lợi nhuận ")
+        prefix = label if ratio_spec else f"{label} {metric_label}"
         text = (
-            f"{label} {metric_label}: {decimal_vi(value)} {result['unit']}. "
+            f"{prefix}: {decimal_vi(value)} {result['unit']}. "
             f"Báo cáo {scope} [1] [2].\n"
         )
         text += "\n".join(
@@ -455,3 +541,30 @@ def factual_answer(service, question, document_id):
         mode="structured",
         warnings=warnings,
     )
+
+
+def answer_from_intent_payload(service, document_id: str, payload: dict) -> AskResponse | None:
+    """Resolve a Colab-parsed structured intent dict deterministically using local facts."""
+    statement = payload.get("statement")
+    metric_code = payload.get("metric_code")
+    operation = payload.get("operation", "lookup")
+    if not statement or not metric_code:
+        return None
+    label_map = {(stmt, code): phrase for phrase, stmt, code in INTENTS}
+    phrase = label_map.get((statement, str(metric_code)))
+    if not phrase:
+        return None
+    periods = [str(p) for p in payload.get("periods", []) if p]
+    scope = payload.get("scope")
+    scope_text = "rieng" if scope == "separate" else ("hop nhat" if scope == "consolidated" else "")
+    op_text = "tang bao nhieu phan tram so voi" if operation == "growth" else (
+        "chenh lech so voi" if operation == "difference" else "la bao nhieu"
+    )
+    if operation in {"growth", "difference"} and len(periods) == 2:
+        synthetic_q = f"{phrase} {periods[0]} {op_text} {periods[1]} {scope_text}".strip()
+    elif periods:
+        synthetic_q = f"{phrase} {periods[0]} {scope_text}".strip()
+    else:
+        synthetic_q = f"{phrase} {scope_text}".strip()
+    return factual_answer(service, synthetic_q, document_id)
+

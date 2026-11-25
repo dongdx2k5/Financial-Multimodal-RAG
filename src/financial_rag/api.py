@@ -4,11 +4,12 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Annotated
+from typing import Annotated, Literal
 
 import pymupdf
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
+from pydantic import BaseModel
 
 from .analytics import summarize
 from .calculator import CalculationRequest, calculate
@@ -20,7 +21,23 @@ from .service import FinancialRAGService
 app = FastAPI(title="Multimodal RAG Financial", version="0.1.0")
 service = FinancialRAGService(settings)
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pdf-ingest")
-jobs = JobStore(settings.data_dir / "processed" / "jobs.json")
+jobs = JobStore(settings.data_dir / "processed" / "jobs.json", store=service.store)
+
+
+class FactUpdateRequest(BaseModel):
+    value: float | None = None
+    raw_value: str | None = None
+    quality: Literal["consistent", "needs_review", "ocr_unverified", "unverified", "verified"] | None = None
+    recognition_note: str | None = None
+
+
+class CompareRequest(BaseModel):
+    left_document_id: str
+    right_document_id: str
+    statement: str
+    metric_code: str
+    operation: Literal["growth", "difference", "ratio"] = "difference"
+    period_label: str | None = None
 
 
 def locked(function):
@@ -53,14 +70,25 @@ def run_ingestion(job_id, path, ticker, year, name):
 def health() -> dict:
     return {
         "status": "ok",
-        "answer_policy": "deterministic",
-        "llm_enabled": False,
-        "llm_provider": None,
-        "llm_model": None,
+        "answer_policy": "hybrid_colab_deterministic"
+        if service.settings.colab_gpu_url
+        else "deterministic",
+        "llm_enabled": bool(service.settings.colab_gpu_url),
+        "llm_provider": "colab_gpu" if service.settings.colab_gpu_url else None,
+        "colab_configured": bool(service.settings.colab_gpu_url),
+        "storage_backend": "sqlite_fts5",
+        "layout_backend": service.settings.layout_backend,
         "chunks": len(service.retriever.chunks),
         "nodes": service.graph.graph.number_of_nodes(),
         "edges": service.graph.graph.number_of_edges(),
     }
+
+
+@app.get("/health/colab")
+def colab_health():
+    from .colab_client import probe
+
+    return probe(service.settings)
 
 
 @app.post("/ingest")
@@ -117,13 +145,6 @@ def recent_jobs():
     return jobs.recent()
 
 
-@app.get("/health/ollama")
-def ollama_health():
-    from .ollama_client import probe
-
-    return probe(service.settings)
-
-
 @app.post("/ask", response_model=AskResponse)
 def ask(request: AskRequest) -> AskResponse:
     if (
@@ -144,6 +165,11 @@ def dashboard_asset():
     return FileResponse(Path(__file__).parent / "dashboard.js", media_type="text/javascript")
 
 
+@app.get("/assets/styles.css")
+def styles_asset():
+    return FileResponse(Path(__file__).parent / "styles.css", media_type="text/css")
+
+
 @app.get("/documents")
 @locked
 def documents():
@@ -160,13 +186,22 @@ def documents():
     ]
 
 
+@app.delete("/documents/{document_id}")
+def delete_document(document_id: str):
+    if not service.delete_document(document_id):
+        raise HTTPException(404, "Không tìm thấy báo cáo")
+    return {"deleted": True, "document_id": document_id}
+
+
 @app.get("/documents/{document_id}/analysis")
 @locked
 def report_analysis(document_id: str):
     if service.graph.graph.nodes.get(document_id, {}).get("kind") != "Report":
         raise HTTPException(404, "Không tìm thấy báo cáo")
     path = service.settings.data_dir / "processed" / "reports" / f"{document_id}.json"
-    metadata = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    metadata = json.loads(path.read_text(encoding="utf-8")) if path.exists() else (
+        service.store.get_document_metadata(document_id) or {}
+    )
     facts = [
         {"id": node, **attrs}
         for node, attrs in service.graph.graph.nodes(data=True)
@@ -177,6 +212,35 @@ def report_analysis(document_id: str):
         "facts": facts,
         "summary": summarize(facts, metadata.get("checks", [])),
     }
+
+
+@app.patch("/facts/{fact_id}")
+def update_fact(fact_id: str, request: FactUpdateRequest):
+    updated = service.verify_fact(
+        fact_id,
+        value=request.value,
+        raw_value=request.raw_value,
+        quality=request.quality,
+        recognition_note=request.recognition_note,
+    )
+    if updated is None:
+        raise HTTPException(404, "Không tìm thấy fact")
+    return updated
+
+
+@app.post("/compare")
+def compare_documents(request: CompareRequest):
+    try:
+        return service.compare_documents(
+            request.left_document_id,
+            request.right_document_id,
+            request.statement,
+            request.metric_code,
+            request.operation,
+            request.period_label,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/documents/{document_id}/export")
@@ -271,7 +335,7 @@ def document_file(document_id: str):
         raise HTTPException(404, "Không tìm thấy tài liệu")
     return FileResponse(
         attrs["source"],
-        media_type="application/pdf" if Path(attrs["source"]).suffix == ".pdf" else "text/plain",
+        media_type="application/pdf" if Path(attrs["source"]).suffix.lower() == ".pdf" else "text/plain",
     )
 
 

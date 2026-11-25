@@ -107,6 +107,31 @@ def money(raw: str):
     return -number if value.startswith("(") else number
 
 
+def _period_span(header_text: str) -> str | None:
+    compact = fold(header_text).replace(" ", "")
+    if "bathang" in compact:
+        return "quarter"
+    if "sauthang" in compact:
+        return "half_year"
+    if "chinthang" in compact:
+        return "nine_months"
+    if any(token in compact for token in ("canam", "namtaichinh", "chokynam", "namketthuc")):
+        return "year"
+    return None
+
+
+def _format_period(dt: date, kind: str, span: str | None) -> tuple[str, str]:
+    if kind == "balance":
+        return dt.isoformat(), "instant"
+    if span == "half_year":
+        return f"{dt.year}-H{1 if dt.month <= 6 else 2}", "half_year"
+    if span == "nine_months":
+        return f"{dt.year}-9M", "nine_months"
+    if span == "year":
+        return str(dt.year), "year"
+    return f"{dt.year}-Q{(dt.month - 1) // 3 + 1}", "quarter"
+
+
 def extract_statement(page: PageContent, document: Document, context: dict | None = None):
     kind = statement_kind(page.text)
     if not page.words or not page.width:
@@ -128,25 +153,38 @@ def extract_statement(page: PageContent, document: Document, context: dict | Non
             headers.append((w, dt))
     headers.sort(key=lambda item: item[0][0])
 
+    span = _period_span(page.text[:650])
     is_continuation = False
     # Check if page is continuing an active statement from the preceding page
-    if len(headers) != 2 and context and context.get("kind") and page.page == context.get("page_num", -1) + 1:
+    if context and context.get("kind") and page.page == context.get("page_num", -1) + 1:
         cand_kind = context["kind"]
         if kind is None or kind == cand_kind:
+            all_words = page.words + page.secondary_words
             has_codes = any(
                 w[4].strip(".") in METRICS[cand_kind]
-                for w in page.words
+                for w in all_words
                 if page.width * 0.43 < (w[0] + w[2]) / 2 < page.width * 0.50
-            )
-            if has_codes:
+            ) or bool(page.recovered_codes)
+            needs_stitch = len(headers) != 2 or kind is None or (cand_kind != "balance" and span is None)
+            if has_codes and needs_stitch:
                 kind = cand_kind
-                headers = context["headers"]
-                boundary = context["boundary"]
-                starts = context["starts"]
-                ends = context["ends"]
-                header_y = page.height * 0.05
+                span = context.get("span")
+                if len(headers) == 2:
+                    centers = [(w[0] + w[2]) / 2 for w, _ in headers]
+                    boundary = sum(centers) / 2
+                    starts = centers[0] - (centers[1] - centers[0]) * 0.58
+                    ends = centers[1] + (centers[1] - centers[0]) * 0.6
+                    header_y = max(w[3] for w, _ in headers)
+                else:
+                    headers = context["headers"]
+                    boundary = context["boundary"]
+                    starts = context["starts"]
+                    ends = context["ends"]
+                    header_y = -10.0  # Do not clip rows near the top of a continuation page.
                 is_continuation = True
-                warnings.append(f"Trang {page.page}: nối tiếp bảng {kind} từ trang {context['page_num']}.")
+                warnings.append(
+                    f"Trang {page.page}: nối tiếp bảng {kind} từ trang {context['page_num']}."
+                )
 
     if not is_continuation:
         if not kind:
@@ -162,8 +200,7 @@ def extract_statement(page: PageContent, document: Document, context: dict | Non
         starts = centers[0] - (centers[1] - centers[0]) * 0.58
         ends = centers[1] + (centers[1] - centers[0]) * 0.6
         header_y = max(w[3] for w, _ in headers)
-        header_text = fold(page.text[:650]).replace(" ", "")
-        if kind != "balance" and "bathang" not in header_text:
+        if kind != "balance" and span is None:
             if context:
                 context.clear()
             return [], [
@@ -241,9 +278,7 @@ def extract_statement(page: PageContent, document: Document, context: dict | Non
                     f"Trang {page.page}, mã {code}, cột {dt}: số OCR không chắc chắn ({raw}); bỏ khỏi phép tính."
                 )
                 continue
-            period = (
-                dt.isoformat() if kind == "balance" else f"{dt.year}-Q{(dt.month - 1) // 3 + 1}"
-            )
+            period, period_kind = _format_period(dt, kind, span)
             values.append(
                 {
                     "metric": METRICS[kind][code],
@@ -252,7 +287,7 @@ def extract_statement(page: PageContent, document: Document, context: dict | Non
                     "raw_value": raw,
                     "period": dt.year,
                     "period_label": period,
-                    "period_kind": "instant" if kind == "balance" else "quarter",
+                    "period_kind": period_kind,
                     "unit": "VND",
                     "statement": kind,
                     "recognition_note": recognition_note,
@@ -283,15 +318,18 @@ def extract_statement(page: PageContent, document: Document, context: dict | Non
         )
     if context is not None:
         last_code = chunks[-1].financial_rows[0].get("metric_code") if chunks else None
-        if last_code in {"440", "60", "70"}:
+        if (kind, last_code) in {("balance", "440"), ("income", "60"), ("cashflow", "70")}:
             context.clear()
         elif chunks:
-            context.update({
-                "kind": kind,
-                "headers": headers,
-                "boundary": boundary,
-                "starts": starts,
-                "ends": ends,
-                "page_num": page.page,
-            })
+            context.update(
+                {
+                    "kind": kind,
+                    "span": span,
+                    "headers": headers,
+                    "boundary": boundary,
+                    "starts": starts,
+                    "ends": ends,
+                    "page_num": page.page,
+                }
+            )
     return chunks, warnings

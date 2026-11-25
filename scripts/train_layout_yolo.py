@@ -39,10 +39,11 @@ def train_yolo(data_yaml: Path, model_name: str = "yolov8n.pt", epochs: int = 50
     print(f"Validation mAP50:    {metrics.box.map50:.4f}")
 
     print("\nExporting model to ONNX for CPU inference in Financial-Multimodal-RAG...")
-    onnx_path = model.export(format="onnx", opset=12, dynamic=True)
+    onnx_path = model.export(format="onnx", opset=12, dynamic=False, imgsz=imgsz)
     print(f"Exported ONNX model to: {onnx_path}")
     print("\nYou can configure this model in .env via:")
-    print(f"  OCR_DETECTOR_PATH={onnx_path}")
+    print("  LAYOUT_BACKEND=yolo")
+    print(f"  LAYOUT_MODEL_PATH={onnx_path}")
 
 
 def main():

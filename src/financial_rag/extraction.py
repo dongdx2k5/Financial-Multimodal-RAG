@@ -43,8 +43,45 @@ class FinancialFactExtractor:
     def extract(self, chunk: Chunk) -> list[FinancialFact]:
         # Experimental structure recognition is evidence, not an approved financial mapping.
         # Merged headers / period semantics must be validated before arithmetic is allowed.
-        if chunk.table_structure_engine or chunk.ocr_engine == "vietocr":
+        if chunk.table_structure_engine or chunk.ocr_engine in {"vietocr", "colab_gpu"}:
             return []
+        if chunk.extraction_method == "chart" and chunk.chart_points:
+            chart_facts = []
+            for idx, pt in enumerate(chunk.chart_points):
+                raw_val = str(pt.get("raw_value") or pt.get("value") or "")
+                val = pt.get("value")
+                if val is None or not raw_val:
+                    continue
+                series = str(pt.get("series") or "Biểu đồ")
+                period_label = pt.get("period_label")
+                period = pt.get("period")
+                fact_id = hashlib.sha1(
+                    f"{chunk.id}|{series}|{period_label}|{raw_val}|{idx}".encode()
+                ).hexdigest()[:16]
+                chart_facts.append(
+                    FinancialFact(
+                        id=fact_id,
+                        document_id=chunk.document_id,
+                        chunk_id=chunk.id,
+                        source=chunk.source,
+                        ticker=chunk.ticker,
+                        page=chunk.page,
+                        metric=series,
+                        value=float(val),
+                        raw_value=raw_val,
+                        unit=pt.get("unit"),
+                        period=period,
+                        period_label=period_label,
+                        period_kind="year" if period_label and str(period_label).isdigit() else None,
+                        scope=chunk.scope,
+                        statement="chart",
+                        bbox=chunk.bbox,
+                        extraction_method="chart",
+                        confidence=0.70,
+                        quality="unverified",
+                    )
+                )
+            return chart_facts
         if chunk.financial_rows:
             return [
                 FinancialFact(
@@ -75,8 +112,10 @@ class FinancialFactExtractor:
                 value = parse_vietnamese_number(raw_value)
             except ValueError:
                 continue
-            fact_id = hashlib.sha1(f"{chunk.id}|{metric}|{raw_value}".encode()).hexdigest()[:16]
             period = int(match.group("fact_year")) if match.group("fact_year") else default_period
+            fact_id = hashlib.sha1(
+                f"{chunk.id}|{metric}|{period}|{raw_value}|{match.start()}".encode()
+            ).hexdigest()[:16]
             facts.append(
                 FinancialFact(
                     id=fact_id,
@@ -85,10 +124,14 @@ class FinancialFactExtractor:
                     raw_value=raw_value,
                     unit=match.group("unit"),
                     period=period,
+                    document_id=chunk.document_id,
                     ticker=chunk.ticker,
+                    scope=chunk.scope,
                     chunk_id=chunk.id,
                     source=chunk.source,
                     page=chunk.page,
+                    bbox=chunk.bbox,
+                    extraction_method=chunk.extraction_method,
                     confidence=0.65,
                 )
             )
@@ -122,7 +165,10 @@ class FinancialFactExtractor:
                 raw = (row[col] or "").strip()
                 if not re.fullmatch(r"\(?[-+]?\d[\d.,\s]*\)?", raw):
                     continue
-                value = parse_vietnamese_number(raw.strip("()"))
+                try:
+                    value = parse_vietnamese_number(raw.strip("()"))
+                except ValueError:
+                    continue
                 if raw.startswith("("):
                     value = -value
                 facts.append(
@@ -133,9 +179,13 @@ class FinancialFactExtractor:
                         raw_value=raw,
                         period=year,
                         unit=chunk.table_unit,
+                        document_id=chunk.document_id,
+                        scope=chunk.scope,
                         chunk_id=chunk.id,
                         source=chunk.source,
                         page=chunk.page,
+                        bbox=chunk.bbox,
+                        extraction_method=chunk.extraction_method,
                         ticker=chunk.ticker,
                         confidence=0.7,
                     )

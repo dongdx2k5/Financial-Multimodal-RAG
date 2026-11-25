@@ -1,12 +1,8 @@
 # Multimodal RAG Financial
 
-Ứng dụng local đọc hiểu báo cáo tài chính tiếng Việt: tải PDF lên, trích xuất văn bản/bảng,
-chuyển số liệu thành đồ thị tri thức, tìm bằng chứng và trả lời kèm nguồn theo trang.
-Hỏi đáp **không gọi LLM/Ollama/OpenAI**: dùng bộ luật, công thức và mẫu trả lời có nguồn.
-Không cần API key hoặc tải model chat. OCR cho PDF scan mặc định dùng Tesseract.
-Có [nhánh thử nghiệm VietOCR + nhận cấu trúc bảng SLANet_plus](docs/OCR_EXPERIMENT.md),
-chạy trong môi trường và kho dữ liệu riêng, chưa thay mặc định.
-Xem [phạm vi hỏi đáp, mẫu câu và trạng thái kết quả](docs/DETERMINISTIC_QA.md).
+Ứng dụng đọc hiểu báo cáo tài chính tiếng Việt theo kiến trúc **Hybrid Local + Google Colab GPU**:
+- **Chạy trên máy Local**: Giao diện Split-Pane Web UI, lưu trữ `SQLite + FTS5`, Knowledge Graph (`NetworkX`), kiểm tra công thức kế toán Thông tư 200 và tính toán `Decimal` tất định.
+- **Chạy trên Google Colab T4+ (tùy chọn)**: Chỉ gọi API suy luận GPU trên Colab (`scripts/colab_gpu_server.py` + `colab_gpu_worker.ipynb`) cho các tác vụ nặng: VLM đọc biểu đồ ảnh (`Qwen2.5-VL`), tổng hợp thuyết minh có trích dẫn, phân tích câu hỏi tự nhiên và GPU OCR/Embeddings. **Không dùng Ollama local.**
 
 Đây là MVP phục vụ nghiên cứu và hỗ trợ đọc báo cáo, không phải công cụ kiểm toán
 hay tư vấn đầu tư. Luôn đối chiếu số liệu quan trọng với PDF gốc.
@@ -198,15 +194,18 @@ Kết quả tìm kiếm không được coi là câu trả lời đã xác minh.
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
+| `COLAB_GPU_URL` | Chưa đặt | URL HTTPS tunnel của Colab GPU Worker (`colab_gpu_worker.ipynb`) |
+| `COLAB_API_TOKEN` | Chưa đặt | Bearer token xác thực khi gọi Colab GPU API |
+| `COLAB_OCR_ENABLED` | `false` | Gửi ảnh trang scan lên Colab GPU OCR |
+| `LAYOUT_BACKEND` | `none` | Phát hiện vùng bảng/biểu đồ (`none`, `heuristic`, `yolo`) |
+| `LAYOUT_MODEL_PATH` | Chưa đặt | Đường dẫn model ONNX YOLO layout (`table`/`chart`) |
 | `OCR_ENABLED` | `false` | Bật OCR cho trang scan |
-| `OCR_LANGUAGE` | `vie+eng` | Ngôn ngữ OCR đã cài |
-| `TESSDATA_PREFIX` | Chưa đặt | Thư mục chứa các file ngôn ngữ OCR |
+| `OCR_LANGUAGE` | `vie+eng` | Ngôn ngữ OCR cục bộ |
+| `TESSDATA_PREFIX` | Chưa đặt | Thư mục chứa các file ngôn ngữ Tesseract |
 | `TESSDATA_BEST_PREFIX` | Chưa đặt | Bộ best tùy chọn để hỗ trợ phục hồi ô số |
-| `DATA_DIR` | `<repo>/data` | Kho dữ liệu local; nên dùng đường dẫn tuyệt đối nếu đổi |
+| `DATA_DIR` | `<repo>/data` | Kho dữ liệu local (`financial.db`, uploads, cache) |
 
-`EMBEDDING_MODEL` có trong cấu hình cũ nhưng chưa dùng để tạo dense embeddings.
-Các cấu hình `LLM_PROVIDER`, `OLLAMA_*`, `OPENAI_*` được giữ để tương thích với
-client/thử nghiệm cũ, **không bật được LLM trong `/ask`**. Không cần extra `llm`.
+Nếu không cấu hình `COLAB_GPU_URL`, toàn bộ hệ thống chạy offline 100% cục bộ theo chế độ tất định.
 
 ## API và dòng lệnh
 
@@ -214,17 +213,20 @@ Schema request/response đầy đủ nằm trong `/docs` khi server đang chạy
 
 | Endpoint | Chức năng |
 |---|---|
-| `GET /health` | `answer_policy=deterministic`, `llm_enabled=false`, kích thước chỉ mục |
-| `GET /health/ollama` | Chẩn đoán client cũ tùy chọn; giao diện hỏi đáp không gọi endpoint này |
+| `GET /health` | Trạng thái hệ thống, SQLite FTS5, layout backend, Colab GPU và kích thước chỉ mục |
+| `GET /health/colab` | Kiểm tra kết nối và VRAM GPU trên Google Colab Worker |
 | `POST /ingest` | Multipart `file`, tùy chọn `ticker`, `year`, `background=true` để nạp nền |
-| `GET /jobs`, `GET /jobs/{job_id}` | Lịch sử và tiến độ nạp |
+| `GET /jobs`, `GET /jobs/{job_id}` | Lịch sử và tiến độ nạp (lưu trong SQLite) |
 | `GET /documents` | Danh sách báo cáo và ID |
+| `DELETE /documents/{id}` | Xóa báo cáo khỏi SQLite, FTS5, Graph và file upload |
 | `GET /documents/{id}/analysis` | Metadata, facts, kiểm tra chất lượng, tổng quan |
+| `PATCH /facts/{fact_id}` | Xác minh thủ công hoặc chỉnh sửa giá trị OCR sai và chạy lại kiểm tra |
+| `POST /compare` | So sánh trực tiếp một chỉ tiêu giữa hai báo cáo bằng `Decimal` |
 | `GET /documents/{id}/export` | Tải JSON phân tích, rút gọn trường đường dẫn nguồn |
 | `GET /documents/{id}/graph` | Graph theo báo cáo; `limit` tối đa 1.000 node |
 | `GET /documents/{id}/file` | Tài liệu gốc đã lưu |
 | `GET /documents/{id}/pages/{page}` | Ảnh PNG của trang PDF; `chunk_id` tùy chọn để đánh dấu nguồn |
-| `POST /ask` | `question`, `document_id`, `top_k` (1–20); `use_llm` cũ bị bỏ qua kèm cảnh báo |
+| `POST /ask` | `question`, `document_id`, `top_k` (1–20); `use_llm` gọi Colab GPU nếu đã cấu hình |
 | `POST /calculate` | `operation`: `growth`, `difference`, `ratio`; hai fact ID |
 | `GET /graph` | Graph toàn kho, giới hạn mặc định 500 |
 
@@ -262,27 +264,30 @@ dữ kiện regex trong TXT hiện chỉ hỗ trợ truy xuất đoạn, không 
 ```text
 src/financial_rag/
   api.py, cli.py                 Web API và dòng lệnh
-  app.html, dashboard.js         Giao diện, tổng quan và graph explorer
-  ingestion.py                  Đọc tài liệu, OCR, chia chunks (hỗ trợ nối bảng đa trang)
-  financial_tables.py           Trích dòng bảng theo tọa độ và nối bảng đa trang
+  app.html, dashboard.js, styles.css  Split-Pane UI, Graph Canvas, PDF Viewer & xác minh Fact
+  ingestion.py                   Đọc tài liệu, OCR, layout và chia chunks
+  financial_tables.py            Trích dòng bảng theo tọa độ và nối bảng đa trang
   ocr_recovery.py                Phục hồi OCR mã dòng
+  layout_detector.py             Phát hiện vùng bảng/biểu đồ (Heuristic & YOLO ONNX)
   extraction.py, models.py       Trích facts và schema dữ liệu
-  graph.py, retrieval.py         NetworkX graph và TF-IDF + graph retrieval
-  sqlite_store.py               Lưu trữ SQLite hiệu năng cao kèm FTS5 BM25 search
-  chart_reader.py               Trích xuất số liệu và fact từ vùng biểu đồ/sơ đồ
-  answers.py, calculator.py      Hỏi số liệu và phép tính
+  graph.py, retrieval.py         NetworkX graph và TF-IDF + FTS5 BM25 + graph retrieval
+  sqlite_store.py                Lưu trữ SQLite + FTS5 BM25 + Jobs + Human verification
+  chart_reader.py                Trích xuất số liệu từ vùng biểu đồ (vector & Colab VLM)
+  colab_client.py                Client gọi Google Colab T4+ GPU API qua HTTPS
+  answers.py, calculator.py      Hỏi số liệu tất định và phép tính Decimal
   quality.py, analytics.py       Kiểm tra kế toán và tổng quan
   service.py, config.py          Điều phối và cấu hình
   storage.py, jobs.py            Ghi JSON và tác vụ nền
-scripts/                        Cài OCR, gán nhãn layout (Label Studio / YOLO), tải dataset
-tests/                          Kiểm thử tự động (166+ test cases)
-samples/                        Báo cáo demo dạng text và PDF (kèm bảng và biểu đồ)
-docs/                           Tài liệu kiến trúc, QA tất định, OCR, Antigravity, Gán nhãn DLA
-data/uploads/                   Bản sao tài liệu người dùng, không đưa lên Git
-data/processed/                 OCR cache, metadata báo cáo, jobs.json
-data/index/                     graph.json, chunks.json
-data/raw/                       Dataset tải tùy chọn
-start-local.ps1                 Lệnh khởi chạy nhanh ứng dụng cục bộ
+scripts/                         Cài OCR, gán nhãn X-AnyLabeling/Label Studio/YOLO, Colab GPU server
+colab_gpu_worker.ipynb           Notebook khởi chạy GPU Worker + Tunnel trên Google Colab T4+
+tests/                           Kiểm thử tự động
+samples/                         Báo cáo demo dạng text và PDF (kèm bảng và biểu đồ)
+docs/                            Tài liệu kiến trúc, QA tất định, OCR, Antigravity, Gán nhãn DLA
+data/uploads/                    Bản sao tài liệu người dùng, không đưa lên Git
+data/processed/                  OCR cache, metadata báo cáo
+data/index/                      financial.db (SQLite + FTS5), graph.json
+data/raw/                        Dataset tải tùy chọn
+start-local.ps1                  Lệnh khởi chạy nhanh ứng dụng cục bộ
 ```
 
 ## Dataset

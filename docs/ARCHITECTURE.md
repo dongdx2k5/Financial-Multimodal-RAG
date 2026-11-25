@@ -1,66 +1,44 @@
 # Kiến Trúc Kỹ Thuật (Architecture & Schema)
 
-Tài liệu mô tả chi tiết kiến trúc của hệ thống `Multimodal RAG Financial`.
+Hệ thống `Multimodal RAG Financial` vận hành theo mô hình **Hybrid Local + Google Colab GPU**:
+- **Máy Local**: Giữ toàn bộ Web UI, upload PDF gốc, kho lưu trữ `SQLite + FTS5`, Knowledge Graph (`NetworkX`), kiểm tra kế toán và bộ tính toán `Decimal` tất định.
+- **Google Colab T4+ (tùy chọn)**: Chỉ nhận các tác vụ GPU nặng qua HTTPS API (`scripts/colab_gpu_server.py`) gồm VLM đọc biểu đồ ảnh (`Qwen2.5-VL`), phân tích ý định câu hỏi, tổng hợp giải thích có trích dẫn và Dense Embeddings (`BAAI/bge-m3`).
 
 ---
 
 ## 1. Triết Lý Thiết Kế: Deterministic Over Generative
 
-Hầu hết các hệ thống RAG hiện tại sử dụng Large Language Model (LLM) để đọc văn bản và sinh câu trả lời tự nhiên. Tuy nhiên, trong lĩnh vực báo cáo tài chính, **ảo giác số liệu (hallucination)** và **lỗi suy luận nhân quả** gây ra rủi ro nghiêm trọng.
-
-Hệ thống này được thiết kế theo nguyên tắc:
-1. **Dữ kiện số học phải có bằng chứng tọa độ nguồn**: Mỗi số trích xuất (`Fact`) phải gắn liền với trang PDF, tọa độ bounding box (`bbox`), mã dòng kế toán và giá trị văn bản gốc (`raw_value`).
-2. **Không dùng LLM để sinh số hoặc tính toán**: Số học được tính toán bằng module `calculator.py` sử dụng chuẩn `Decimal` với các ràng buộc khắt khe.
-3. **Từ chối trả lời (Abstention) khi thiếu bằng chứng**: Khi câu hỏi vượt quá bộ luật đã định nghĩa hoặc thiếu sự đồng nhất kỳ/phạm vi, hệ thống chỉ hiển thị đoạn trích tra cứu và nêu rõ chưa đủ bằng chứng.
+1. **Dữ kiện số học phải có bằng chứng tọa độ nguồn**: Mỗi số trích xuất (`Fact`) gắn liền với trang PDF, tọa độ `bbox`, mã dòng kế toán và giá trị gốc (`raw_value`).
+2. **Không dùng LLM để tự tính toán hoặc bịa số**: Mọi phép tăng trưởng, chênh lệch và tỷ số được tính bằng `calculator.py` dùng chuẩn `Decimal`. Khi Colab GPU phân tích ý định câu hỏi tự nhiên (`/v1/qa/parse_intent`), kết quả vẫn phải đi qua luồng truy xuất và tính toán tất định cục bộ.
+3. **Hậu kiểm chống ảo giác & Từ chối khi thiếu bằng chứng**: Phản hồi tổng hợp từ Colab (`/v1/qa/synthesize`) bắt buộc qua `colab_client.validate_output` kiểm tra số liệu khớp nguyên văn và trích dẫn `[1]..[n]`.
 
 ---
 
 ## 2. Các Tầng Kiến Trúc
 
 ```text
-[PDF / TXT / Scan]
+[PDF / TXT / HTML / MD]
        │
        ▼
-[Tầng Ingestion & Layout]
-       ├── PyMuPDF Text / Tesseract OCR / VietOCR
-       └── Spatial Table Extractor (Tách dòng, nhận diện mốc kỳ DD/MM/YYYY)
+[Tầng Ingestion & Layout (Local hoặc Colab GPU)]
+       ├── PyMuPDF Text / Tesseract OCR / VietOCR / Colab GPU OCR
+       ├── Layout Detector (Heuristic hoặc YOLO ONNX qua LAYOUT_MODEL_PATH)
+       ├── Spatial Table Extractor (Nối bảng đa trang, đọc kỳ quý/6T/9T/năm)
+       └── ChartReader (Vector heuristic hoặc Colab VLM cho biểu đồ ảnh)
        │
        ▼
 [Tầng Kiểm Tra Chất Lượng (Quality Assurance)]
-       ├── Kiểm tra công thức nội bộ (VD: Lợi nhuận gộp = Doanh thu thuần - Giá vốn)
-       └── Đối chiếu chéo (Tiền cuối kỳ trên LCTT = Tiền trên BĐKT tại đúng ngày chốt)
+       ├── Công thức nội bộ Thông tư 200 (KQKD, CĐKT, LCTT)
+       └── Đối chiếu chéo tiền đầu/cuối kỳ giữa LCTT và BĐKT
        │
        ▼
-[Tầng Lưu Trữ & Tri Thức (Knowledge Graph & Index)]
-       ├── NetworkX MultiDiGraph (Nodes: Company, Report, Period, Metric, Fact, Chunk)
-       └── TF-IDF / BM25 / SQLite Full-Text Index
+[Tầng Lưu Trữ & Tri Thức (Local SQLite + Graph)]
+       ├── FinancialSQLiteStore (documents, chunks, chunks_fts BM25, facts, jobs)
+       └── NetworkX MultiDiGraph (Company, Report, Period, Metric, Fact, Chunk)
        │
        ▼
-[Tầng Phân Tích & Hỏi Đáp (Service & Answers)]
-       ├── Cổng từ vựng (Vocabulary Gating)
-       ├── Calculator (Tăng trưởng, chênh lệch, tỷ số)
-       └── API FastAPI & Web Dashboard
+[Tầng Phân Tích, Hỏi Đáp & Split-Pane UI]
+       ├── Deterministic QA (answers.py + Decimal calculator.py)
+       ├── Hybrid Retrieval (TF-IDF + SQLite FTS5 BM25 + Graph Boost)
+       └── Split-Pane Web Workspace (Chat, KPI & SVG Chart, Xác minh Fact, Graph Canvas, PDF Viewer)
 ```
-
----
-
-## 3. Lược Đồ Đồ Thị Tri Thức (Knowledge Graph Schema)
-
-Đồ thị được mô hình hóa bằng `networkx.MultiDiGraph`:
-
-### Các loại Node:
-- `Company`: Doanh nghiệp, thuộc tính: `ticker`.
-- `Report`: Báo cáo tài chính, thuộc tính: `source`, `ticker`, `year`, `scope`, `name`.
-- `Period`: Kỳ kế toán, thuộc tính: `year` hoặc `period_label` (VD: `2024-Q1`).
-- `Metric`: Chỉ tiêu tài chính theo Thông tư 200 (VD: `Doanh thu thuần`, `Lợi nhuận sau thuế`).
-- `Fact`: Số liệu cụ thể trích xuất được từ báo cáo.
-- `Chunk`: Đoạn văn bản hoặc dòng bảng gốc, lưu tọa độ `bbox` và số trang.
-
-### Các Quan Hệ (Edges):
-- `(Company) -[HAS_REPORT]-> (Report)`
-- `(Report) -[FOR_PERIOD]-> (Period)`
-- `(Report) -[MENTIONS]-> (Chunk)`
-- `(Chunk) -[NEXT]-> (Chunk)` (Quan hệ thứ tự đọc văn bản)
-- `(Report) -[HAS_FACT]-> (Fact)`
-- `(Fact) -[MEASURES]-> (Metric)`
-- `(Fact) -[SUPPORTED_BY]-> (Chunk)`

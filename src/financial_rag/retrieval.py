@@ -11,18 +11,23 @@ from .storage import atomic_json
 
 
 class HybridRetriever:
-    def __init__(self, chunks_path: Path, graph: KnowledgeGraph):
+    def __init__(self, chunks_path: Path, graph: KnowledgeGraph, *, store=None):
         self.chunks_path = chunks_path
         self.graph = graph
+        self.store = store
         self.chunks: list[Chunk] = []
         self.vectorizer: TfidfVectorizer | None = None
         self.matrix = None
         self.load()
 
     def load(self) -> None:
-        if self.chunks_path.exists():
+        if self.store is not None:
+            self.chunks = self.store.load_chunks()
+        if not self.chunks and self.chunks_path.exists():
             raw = json.loads(self.chunks_path.read_text(encoding="utf-8"))
             self.chunks = [Chunk.model_validate(item) for item in raw]
+            if self.store is not None and self.chunks:
+                self.store.save_chunks(self.chunks)
         self._fit()
 
     def _fit(self) -> None:
@@ -43,8 +48,17 @@ class HybridRetriever:
         current = {chunk.id: chunk for chunk in self.chunks if chunk.document_id not in reports}
         current.update({chunk.id: chunk for chunk in chunks})
         self.chunks = list(current.values())
-        self.chunks_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_json(self.chunks_path, [chunk.model_dump() for chunk in self.chunks])
+        if self.store is not None:
+            self.store.save_chunks(chunks)
+        else:
+            self.chunks_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_json(self.chunks_path, [chunk.model_dump() for chunk in self.chunks])
+        self._fit()
+
+    def remove_document(self, document_id: str) -> None:
+        self.chunks = [chunk for chunk in self.chunks if chunk.document_id != document_id]
+        if self.store is None and self.chunks_path.exists():
+            atomic_json(self.chunks_path, [chunk.model_dump() for chunk in self.chunks])
         self._fit()
 
     def search(self, query: str, top_k: int = 5, document_id: str | None = None) -> list[Evidence]:
@@ -52,20 +66,35 @@ class HybridRetriever:
             return []
         from .answers import expand_query
 
-        query = expand_query(query)
+        expanded = expand_query(query)
         for alias, full in {
             "dong tien kinh doanh": "luu chuyen tien thuan tu hoat dong kinh doanh",
             "dong tien dau tu": "luu chuyen tien thuan tu hoat dong dau tu",
             "dong tien tai chinh": "luu chuyen tien thuan tu hoat dong tai chinh",
         }.items():
-            query = query.replace(alias, full)
-        query_vector = self.vectorizer.transform([query])
+            expanded = expanded.replace(alias, full)
+        query_vector = self.vectorizer.transform([expanded])
         scores = (self.matrix @ query_vector.T).toarray().ravel()
-        policy_query = any(term in query for term in ["ghi nhan", "chinh sach", "dieu kien"])
+        positions = {chunk.id: i for i, chunk in enumerate(self.chunks)}
+
+        # Blend SQLite FTS5 BM25 lexical signal via reciprocal rank fusion when active.
+        if self.store is not None:
+            fts_hits = self.store.search_chunks_fts(
+                query, document_id=document_id, limit=max(top_k * 3, 15)
+            )
+            if not fts_hits and expanded != query:
+                fts_hits = self.store.search_chunks_fts(
+                    expanded, document_id=document_id, limit=max(top_k * 3, 15)
+                )
+            for rank_idx, hit in enumerate(fts_hits):
+                pos = positions.get(hit["chunk_id"])
+                if pos is not None:
+                    scores[pos] += 0.25 / (rank_idx + 1)
+
+        policy_query = any(term in expanded for term in ["ghi nhan", "chinh sach", "dieu kien"])
         # Traverse matching Metric <- MEASURES - Fact -> SUPPORTED_BY -> Chunk edges.
         graph = self.graph.graph
-        positions = {chunk.id: i for i, chunk in enumerate(self.chunks)}
-        query_words = set(fold(query).split())
+        query_words = set(fold(expanded).split())
         for node, attrs in graph.nodes(data=True):
             if policy_query:
                 break  # Policies need explanatory text, not metric-node boosts.

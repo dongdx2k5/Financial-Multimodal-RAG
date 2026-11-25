@@ -86,6 +86,34 @@ def summarize(raw_facts, checks):
                 )
             except ValueError:
                 continue
+    for num_code, den_code, label in [
+        ("300", "400", "Hệ số nợ phải trả / VCSH"),
+        ("100", "310", "Khả năng thanh toán hiện hành"),
+    ]:
+        dens = [f for f in facts if f.statement == "balance" and f.metric_code == den_code]
+        for period in sorted({f.period_label for f in dens if f.period_label}, reverse=True):
+            denominator = [f for f in dens if f.period_label == period]
+            numerator = [
+                f
+                for f in facts
+                if f.statement == "balance" and f.metric_code == num_code and f.period_label == period
+            ]
+            if len(denominator) != 1 or len(numerator) != 1:
+                continue
+            try:
+                calculation = calculate("ratio", numerator[0], denominator[0])
+                ratios.append(
+                    {
+                        "metric": label,
+                        "period": period,
+                        "value": calculation["value"],
+                        "unit": "%",
+                        "formula": calculation["formula"],
+                        "fact_ids": [numerator[0].id, denominator[0].id],
+                    }
+                )
+            except ValueError:
+                continue
     return {
         "cards": cards,
         "ratios": ratios,

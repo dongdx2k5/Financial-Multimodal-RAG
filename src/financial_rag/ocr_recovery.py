@@ -5,10 +5,11 @@ import pymupdf
 from .financial_tables import METRICS, money, spatial_lines, statement_kind
 
 
-def recover_codes(page, content, tessdata):
+def recover_codes(page, content, tessdata, statement_hint: str | None = None):
     if content.code_recovery_version == 1:
         return
-    if content.extraction_method != "ocr" or statement_kind(content.text) != "cashflow":
+    kind = statement_kind(content.text) or statement_hint
+    if content.extraction_method != "ocr" or kind != "cashflow":
         content.code_recovery_version = 1
         return
     width = content.width

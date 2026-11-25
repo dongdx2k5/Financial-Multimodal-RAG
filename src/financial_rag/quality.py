@@ -85,21 +85,41 @@ def check_facts(facts):
             or fact.metric_code not in {"60", "70"}
             or fact.period_kind != "quarter"
             or not fact.period_label
+            or "-Q" not in fact.period_label
         ):
             continue
-        year, quarter = fact.period_label.split("-Q")
-        month = (int(quarter) - 1) * 3 + 1 if fact.metric_code == "60" else int(quarter) * 3
-        day = 1 if fact.metric_code == "60" else monthrange(int(year), month)[1]
-        date_label = f"{year}-{month:02d}-{day:02d}"
+        year_str, quarter_str = fact.period_label.split("-Q", 1)
+        if not (year_str.isdigit() and quarter_str.isdigit()):
+            continue
+        year, quarter = int(year_str), int(quarter_str)
+        if fact.metric_code == "60":
+            month = (quarter - 1) * 3 + 1
+            start_label = f"{year}-{month:02d}-01"
+            if quarter == 1:
+                prev_end_label = f"{year - 1}-12-31"
+            else:
+                prev_month = (quarter - 1) * 3
+                prev_end_label = f"{year}-{prev_month:02d}-{monthrange(year, prev_month)[1]:02d}"
+            candidate_dates = {start_label, prev_end_label}
+            date_label = start_label
+        else:
+            month = quarter * 3
+            date_label = f"{year}-{month:02d}-{monthrange(year, month)[1]:02d}"
+            candidate_dates = {date_label}
         matches = [
             other
             for other in facts
             if other.statement == "balance"
             and other.metric_code == "110"
-            and other.period_label == date_label
+            and other.period_label in candidate_dates
             and (other.document_id or other.source) == (fact.document_id or fact.source)
             and other.scope == fact.scope
         ]
+        # Prefer exact quarter-start match when both start and prior-end balance exist.
+        if len(matches) > 1:
+            exact = [other for other in matches if other.period_label == date_label]
+            if len(exact) == 1:
+                matches = exact
         item = {
             "statement": "cross_statement",
             "period": fact.period_label,
