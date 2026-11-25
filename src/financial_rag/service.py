@@ -1,3 +1,4 @@
+import json
 import shutil
 from pathlib import Path
 from threading import RLock
@@ -21,7 +22,10 @@ class FinancialRAGService:
         self.store = FinancialSQLiteStore(settings.index_dir / "financial.db")
         self.graph = KnowledgeGraph(settings.index_dir / "graph.json")
         self.retriever = HybridRetriever(
-            settings.index_dir / "chunks.json", self.graph, store=self.store
+            settings.index_dir / "chunks.json",
+            self.graph,
+            store=self.store,
+            colab_settings=settings,
         )
         self.loader = DocumentLoader(
             settings.ocr_enabled,
@@ -69,6 +73,19 @@ class FinancialRAGService:
         from .quality import check_facts
 
         checks = check_facts(facts)
+        embedding_rows: list[tuple[str, str, list[float]]] = []
+        if self.settings.colab_embeddings_enabled and self.settings.colab_gpu_url and chunks:
+            from .colab_client import ColabGPUError, embed_texts
+
+            try:
+                for start in range(0, len(chunks), 32):
+                    batch = chunks[start : start + 32]
+                    vectors = embed_texts(self.settings, [c.text for c in batch])
+                    for chunk, vec in zip(batch, vectors, strict=True):
+                        embedding_rows.append((chunk.id, document.id, vec))
+            except ColabGPUError as exc:
+                warnings.append(f"Chưa tạo được embedding trên Colab GPU ({exc}); dùng chỉ mục cục bộ.")
+
         metadata = {
             **document.model_dump(exclude={"pages"}),
             "checks": checks,
@@ -79,6 +96,7 @@ class FinancialRAGService:
             "ocr_engines": sorted({p.ocr_engine for p in document.pages if p.ocr_engine}),
             "structured_tables": sum(len(p.structured_tables) for p in document.pages),
             "charts": sum(len(p.chart_results) for p in document.pages),
+            "embeddings": len(embedding_rows),
         }
         meta_path = self.settings.data_dir / "processed" / "reports" / f"{document.id}.json"
         meta_path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,6 +107,8 @@ class FinancialRAGService:
             self.graph.add_document(document, chunks, facts)
             self.retriever.upsert(chunks)
             self.store.save_facts(facts)
+            if embedding_rows:
+                self.retriever.upsert_embeddings(embedding_rows)
 
         return {
             "document_id": document.id,
@@ -140,10 +160,13 @@ class FinancialRAGService:
         recognition_note: str | None = None,
     ) -> dict | None:
         with self.lock:
+            effective_raw = raw_value if raw_value is not None else (
+                str(value) if value is not None else None
+            )
             updated = self.store.update_fact(
                 fact_id,
                 value=value,
-                raw_value=raw_value,
+                raw_value=effective_raw,
                 quality=quality,
                 recognition_note=recognition_note,
             )
@@ -151,8 +174,8 @@ class FinancialRAGService:
                 attrs = self.graph.graph.nodes[fact_id]
                 if value is not None:
                     attrs["value"] = float(value)
-                if raw_value is not None:
-                    attrs["raw_value"] = raw_value
+                if effective_raw is not None:
+                    attrs["raw_value"] = effective_raw
                 if quality is not None:
                     attrs["quality"] = quality
                 if recognition_note is not None:
@@ -176,7 +199,23 @@ class FinancialRAGService:
                         for n, a in self.graph.graph.nodes(data=True)
                         if a.get("kind") == "Fact" and a.get("document_id") == doc_id
                     ]
+                prior_verified = {f.id for f in doc_facts if f.quality == "verified"}
                 checks = check_facts(doc_facts)
+                for item in doc_facts:
+                    if item.id in prior_verified and item.quality != "needs_review":
+                        item.quality = "verified"
+                    if item.id == updated.id:
+                        updated.quality = item.quality
+                    if item.id in self.graph.graph.nodes:
+                        self.graph.graph.nodes[item.id]["quality"] = item.quality
+                    self.store.update_fact(item.id, quality=item.quality)
+                self.graph.save()
+                self.store.update_document_checks(doc_id, checks)
+                meta_path = self.settings.data_dir / "processed" / "reports" / f"{doc_id}.json"
+                if meta_path.exists():
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    meta["checks"] = checks
+                    atomic_json(meta_path, meta)
             return {"fact": updated.model_dump(), "checks": checks}
 
     def compare_documents(

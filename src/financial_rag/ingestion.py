@@ -147,9 +147,13 @@ class DocumentLoader:
             self.ocr_backend == "colab_gpu"
             or (self.colab_settings and getattr(self.colab_settings, "colab_ocr_enabled", False))
         )
+        attempted_colab = bool(
+            use_colab_ocr and self.colab_settings and getattr(self.colab_settings, "colab_gpu_url", None)
+        )
+        active_backend = "colab_gpu" if attempted_colab else self.ocr_backend
         if needs_ocr and self.ocr_enabled:
             try:
-                if use_colab_ocr and self.colab_settings and getattr(self.colab_settings, "colab_gpu_url", None):
+                if attempted_colab:
                     cacheable = False  # Remote OCR results depend on live Colab worker state.
                     spans, remote_warnings = self._colab_gpu_ocr(page, dpi=200)
                     if not any(s.text.strip() for s in spans):
@@ -187,10 +191,10 @@ class DocumentLoader:
                 method = "ocr"
             except (ImportError, RuntimeError, ValueError, OSError) as exc:
                 cacheable = False
-                warnings.append(f"Trang {page.number + 1}: {self.ocr_backend} thất bại: {exc}")
-                if self.ocr_backend in {"vietocr", "colab_gpu"} and not self.fallback_to_tesseract:
+                warnings.append(f"Trang {page.number + 1}: {active_backend} thất bại: {exc}")
+                if active_backend in {"vietocr", "colab_gpu"} and not self.fallback_to_tesseract:
                     raise RuntimeError(warnings[-1]) from exc
-                if self.ocr_backend in {"vietocr", "colab_gpu"} and self.fallback_to_tesseract:
+                if active_backend in {"vietocr", "colab_gpu"} and self.fallback_to_tesseract:
                     try:
                         text, words = self._tesseract(page)
                         method, engine = "ocr", "tesseract"

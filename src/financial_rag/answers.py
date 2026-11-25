@@ -126,12 +126,13 @@ def matches_numeric_source(fact, chunk):
         value = Decimal(str(parsed))
     except (ValueError, ArithmeticError):
         return False
+    if not value.is_finite() or value != Decimal(str(fact.value)):
+        return False
+    # Human-verified corrections may replace an erroneous OCR literal in chunk.text.
+    if fact.quality == "verified":
+        return True
     text = re.sub(r"\s+", "", chunk.text)
-    return (
-        value.is_finite()
-        and value == Decimal(str(fact.value))
-        and re.search(r"(?<![\d.,])" + re.escape(raw) + r"(?![\d.,])", text) is not None
-    )
+    return re.search(r"(?<![\d.,])" + re.escape(raw) + r"(?![\d.,])", text) is not None
 
 
 def factual_answer(service, question, document_id):

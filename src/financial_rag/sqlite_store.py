@@ -123,6 +123,15 @@ class FinancialSQLiteStore:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs (created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                    chunk_id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    vector_json TEXT NOT NULL,
+                    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_embeddings_doc ON chunk_embeddings (document_id);
                 """)
                 self._ensure_columns(
                     conn,
@@ -413,6 +422,48 @@ class FinancialSQLiteStore:
                 "reporting_period": row["reporting_period"],
                 **meta,
             }
+
+    def update_document_checks(self, document_id: str, checks: list[dict[str, Any]]):
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT metadata_json FROM documents WHERE id = ?", (document_id,)
+            ).fetchone()
+            if row is None:
+                return
+            meta = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+            meta["checks"] = checks
+            conn.execute(
+                "UPDATE documents SET metadata_json = ? WHERE id = ?",
+                (json.dumps(meta, ensure_ascii=False), document_id),
+            )
+
+    def save_embeddings(self, rows: list[tuple[str, str, list[float]]]):
+        if not rows:
+            return
+        with self._connection() as conn:
+            doc_ids = {doc_id for _, doc_id, _ in rows}
+            for doc_id in doc_ids:
+                conn.execute("DELETE FROM chunk_embeddings WHERE document_id = ?", (doc_id,))
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO chunk_embeddings (chunk_id, document_id, vector_json)
+                VALUES (?, ?, ?)
+                """,
+                [(cid, did, json.dumps(vec)) for cid, did, vec in rows],
+            )
+
+    def load_embeddings(self, document_id: str | None = None) -> dict[str, list[float]]:
+        with self._connection() as conn:
+            if document_id:
+                rows = conn.execute(
+                    "SELECT chunk_id, vector_json FROM chunk_embeddings WHERE document_id = ?",
+                    (document_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT chunk_id, vector_json FROM chunk_embeddings"
+                ).fetchall()
+            return {row["chunk_id"]: json.loads(row["vector_json"]) for row in rows}
 
     def delete_document(self, document_id: str) -> dict[str, Any] | None:
         with self._connection() as conn:

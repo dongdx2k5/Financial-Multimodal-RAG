@@ -183,6 +183,122 @@ def test_api_dashboard_export_graph_and_limits(client):
     assert len(client.get("/documents").json()) == 1
 
 
+def test_human_verified_fact_updates_analysis_checks_and_allows_qa(client):
+    from financial_rag.models import Chunk, Document, FinancialFact
+
+    service = api.service
+    chunks = [
+        Chunk(
+            id="c10",
+            document_id="doc-v",
+            source="v.pdf",
+            page=10,
+            text="Doanh thu thuần: 2026-Q1: 100 VND",
+            financial_rows=[{"value": 100}],
+            scope="separate",
+            bbox=[10, 10, 200, 30],
+        ),
+        Chunk(
+            id="c11",
+            document_id="doc-v",
+            source="v.pdf",
+            page=10,
+            text="Giá vốn hàng bán: 2026-Q1: 40 VND",
+            financial_rows=[{"value": 40}],
+            scope="separate",
+            bbox=[10, 40, 200, 60],
+        ),
+        Chunk(
+            id="c20",
+            document_id="doc-v",
+            source="v.pdf",
+            page=10,
+            text="Lợi nhuận gộp: 2026-Q1: 50 VND",  # OCR misread 60 as 50
+            financial_rows=[{"value": 50}],
+            scope="separate",
+            bbox=[10, 70, 200, 90],
+        ),
+    ]
+    facts = [
+        FinancialFact(
+            id="f10",
+            document_id="doc-v",
+            chunk_id="c10",
+            source="v.pdf",
+            page=10,
+            metric="Doanh thu thuần",
+            metric_code="10",
+            value=100,
+            raw_value="100",
+            unit="VND",
+            period=2026,
+            period_label="2026-Q1",
+            period_kind="quarter",
+            scope="separate",
+            statement="income",
+            confidence=0.7,
+        ),
+        FinancialFact(
+            id="f11",
+            document_id="doc-v",
+            chunk_id="c11",
+            source="v.pdf",
+            page=10,
+            metric="Giá vốn hàng bán",
+            metric_code="11",
+            value=40,
+            raw_value="40",
+            unit="VND",
+            period=2026,
+            period_label="2026-Q1",
+            period_kind="quarter",
+            scope="separate",
+            statement="income",
+            confidence=0.7,
+        ),
+        FinancialFact(
+            id="f20",
+            document_id="doc-v",
+            chunk_id="c20",
+            source="v.pdf",
+            page=10,
+            metric="Lợi nhuận gộp",
+            metric_code="20",
+            value=50,
+            raw_value="50",
+            unit="VND",
+            period=2026,
+            period_label="2026-Q1",
+            period_kind="quarter",
+            scope="separate",
+            statement="income",
+            confidence=0.7,
+            quality="needs_review",
+        ),
+    ]
+    doc = Document(id="doc-v", source="v.pdf", name="v.pdf", pages=[], scope="separate")
+    service.store.save_document(doc, metadata={"checks": [{"statement": "income", "status": "fail"}]})
+    service.graph.add_document(doc, chunks, facts)
+    service.retriever.upsert(chunks)
+    service.store.save_facts(facts)
+
+    res = client.patch(
+        "/facts/f20",
+        json={"value": 60.0, "raw_value": "60", "quality": "verified"},
+    )
+    assert res.status_code == 200
+    assert res.json()["fact"]["quality"] == "verified"
+    analysis = client.get("/documents/doc-v/analysis").json()
+    income_20_checks = [c for c in analysis["metadata"]["checks"] if c.get("target_code") == "20"]
+    assert income_20_checks and income_20_checks[0]["status"] == "pass"
+
+    qa = client.post(
+        "/ask", json={"question": "Lợi nhuận gộp quý 1/2026 là bao nhiêu?", "document_id": "doc-v"}
+    ).json()
+    assert qa["answer_status"] == "answered"
+    assert "60 VND" in qa["answer"]
+
+
 def test_background_job_completed_and_persisted(client, monkeypatch):
     class ImmediateExecutor:
         def submit(self, function, *args):

@@ -115,7 +115,10 @@ def _run_vlm(messages: list[dict[str, Any]], *, images=None, max_new_tokens: int
 
     model, processor = _get_vlm()
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = processor(text=[text], images=images, padding=True, return_tensors="pt").to(model.device)
+    proc_kwargs: dict[str, Any] = {"text": [text], "padding": True, "return_tensors": "pt"}
+    if images is not None:
+        proc_kwargs["images"] = images
+    inputs = processor(**proc_kwargs).to(model.device)
     with torch.inference_mode():
         generated = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
     trimmed = generated[0][inputs["input_ids"].shape[1] :]

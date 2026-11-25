@@ -121,3 +121,70 @@ def test_probe_unconfigured():
     status = probe(Settings(colab_gpu_url=None))
     assert not status["configured"]
     assert not status["ready"]
+
+
+def test_colab_dense_embeddings_persisted_and_used_in_search(tmp_path, monkeypatch):
+    def fake_urlopen(req, timeout):
+        assert req.full_url.endswith("/v1/embed")
+        payload = json.loads(req.data.decode("utf-8"))
+        texts = payload["texts"]
+        vecs = []
+        for t in texts:
+            if "chuyển giao" in t.lower() or "rủi ro" in t.lower() or "kế toán" in t.lower():
+                vecs.append([1.0, 0.0, 0.0])
+            else:
+                vecs.append([0.0, 1.0, 0.0])
+        return io.BytesIO(json.dumps({"embeddings": vecs}).encode())
+
+    monkeypatch.setattr("financial_rag.colab_client.urlopen", fake_urlopen)
+    cfg = Settings(
+        data_dir=tmp_path / "data",
+        colab_gpu_url="https://demo.trycloudflare.com",
+        colab_embeddings_enabled=True,
+    )
+    service = FinancialRAGService(cfg)
+    p = tmp_path / "report.txt"
+    p.write_text(
+        "===== PAGE 1 =====\nBáo cáo tài chính tổng quát.\n"
+        "===== PAGE 2 =====\nChính sách ghi nhận khi chuyển giao rủi ro và lợi ích.",
+        encoding="utf-8",
+    )
+    stats = service.ingest(p, ticker="ABC", year=2026)
+    assert stats["chunks"] == 2
+    assert len(service.retriever.embeddings) == 2
+
+    reloaded = FinancialRAGService(cfg)
+    assert len(reloaded.retriever.embeddings) == 2
+    hits = reloaded.retriever.search("nguyên tắc kế toán", top_k=2, document_id=stats["document_id"])
+    assert hits and hits[0].page == 2
+
+
+def test_colab_ocr_enabled_falls_back_to_tesseract_even_when_backend_tesseract(monkeypatch):
+    import pymupdf
+
+    from financial_rag.ingestion import DocumentLoader
+
+    cfg = Settings(
+        ocr_enabled=True,
+        ocr_backend="tesseract",
+        colab_ocr_enabled=True,
+        colab_gpu_url="https://demo.trycloudflare.com",
+        ocr_fallback_to_tesseract=True,
+    )
+    loader = DocumentLoader(
+        ocr_enabled=True,
+        ocr_backend="tesseract",
+        fallback_to_tesseract=True,
+        colab_settings=cfg,
+    )
+    monkeypatch.setattr(
+        loader, "_colab_gpu_ocr", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline"))
+    )
+    monkeypatch.setattr(
+        loader, "_tesseract", lambda page: ("Tesseract fallback OK", [[10, 10, 80, 25, "OK", 0, 0, 0]])
+    )
+    with pymupdf.open() as pdf:
+        content, cacheable = loader._extract_page(pdf.new_page())
+    assert content.ocr_engine == "tesseract"
+    assert any("dự phòng" in w for w in content.warnings)
+    assert not cacheable

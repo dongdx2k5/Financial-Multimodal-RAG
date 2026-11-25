@@ -11,11 +11,13 @@ from .storage import atomic_json
 
 
 class HybridRetriever:
-    def __init__(self, chunks_path: Path, graph: KnowledgeGraph, *, store=None):
+    def __init__(self, chunks_path: Path, graph: KnowledgeGraph, *, store=None, colab_settings=None):
         self.chunks_path = chunks_path
         self.graph = graph
         self.store = store
+        self.colab_settings = colab_settings
         self.chunks: list[Chunk] = []
+        self.embeddings: dict[str, np.ndarray] = {}
         self.vectorizer: TfidfVectorizer | None = None
         self.matrix = None
         self.load()
@@ -23,6 +25,10 @@ class HybridRetriever:
     def load(self) -> None:
         if self.store is not None:
             self.chunks = self.store.load_chunks()
+            self.embeddings = {
+                cid: np.asarray(vec, dtype=np.float32)
+                for cid, vec in self.store.load_embeddings().items()
+            }
         if not self.chunks and self.chunks_path.exists():
             raw = json.loads(self.chunks_path.read_text(encoding="utf-8"))
             self.chunks = [Chunk.model_validate(item) for item in raw]
@@ -55,7 +61,16 @@ class HybridRetriever:
             atomic_json(self.chunks_path, [chunk.model_dump() for chunk in self.chunks])
         self._fit()
 
+    def upsert_embeddings(self, rows: list[tuple[str, str, list[float]]]) -> None:
+        for cid, _, vec in rows:
+            self.embeddings[cid] = np.asarray(vec, dtype=np.float32)
+        if self.store is not None and rows:
+            self.store.save_embeddings(rows)
+
     def remove_document(self, document_id: str) -> None:
+        removed_ids = {c.id for c in self.chunks if c.document_id == document_id}
+        for cid in removed_ids:
+            self.embeddings.pop(cid, None)
         self.chunks = [chunk for chunk in self.chunks if chunk.document_id != document_id]
         if self.store is None and self.chunks_path.exists():
             atomic_json(self.chunks_path, [chunk.model_dump() for chunk in self.chunks])
@@ -90,6 +105,32 @@ class HybridRetriever:
                 pos = positions.get(hit["chunk_id"])
                 if pos is not None:
                     scores[pos] += 0.25 / (rank_idx + 1)
+
+        # Blend Colab GPU dense embeddings similarity when configured and indexed.
+        if (
+            self.colab_settings
+            and getattr(self.colab_settings, "colab_embeddings_enabled", False)
+            and getattr(self.colab_settings, "colab_gpu_url", None)
+            and self.embeddings
+        ):
+            try:
+                from .colab_client import ColabGPUError, embed_texts
+
+                q_vecs = embed_texts(self.colab_settings, [query])
+                if q_vecs:
+                    q_vec = np.asarray(q_vecs[0], dtype=np.float32)
+                    q_norm = float(np.linalg.norm(q_vec))
+                    if q_norm > 0:
+                        for idx, chunk in enumerate(self.chunks):
+                            c_vec = self.embeddings.get(chunk.id)
+                            if c_vec is not None and c_vec.shape == q_vec.shape:
+                                c_norm = float(np.linalg.norm(c_vec))
+                                if c_norm > 0:
+                                    cos = float(np.dot(q_vec, c_vec) / (q_norm * c_norm))
+                                    if cos > 0:
+                                        scores[idx] += 0.40 * cos
+            except ColabGPUError:
+                pass
 
         policy_query = any(term in expanded for term in ["ghi nhan", "chinh sach", "dieu kien"])
         # Traverse matching Metric <- MEASURES - Fact -> SUPPORTED_BY -> Chunk edges.
